@@ -135,6 +135,18 @@
       "new_question": true
     },
     {
+      "question_name": "Parallel upgrades",
+      "question_description": "How many devices to upgrade at once. '1' = one at a time (safest). Higher values run that many in parallel.",
+      "required": false,
+      "type": "multiplechoice",
+      "variable": "upgrade_serial",
+      "min": 0,
+      "max": 1024,
+      "default": "1",
+      "choices": "1\n2\n3\n5\n10",
+      "new_question": true
+    },
+    {
       "question_name": "Reload timeout (seconds)",
       "question_description": "Max wait for SSH to return after a reload.",
       "required": false,

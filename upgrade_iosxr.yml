@@ -22,7 +22,7 @@
 - name: Cisco IOS XR Upgrade
   hosts: iosxr_devices
   gather_facts: false
-  serial: 1                        # upgrade one device at a time
+  serial: "{{ upgrade_serial | default(1) | int }}"  # devices at a time (survey-controlled)
   any_errors_fatal: true           # stop the batch if any host fails a check
 
   vars:
@@ -38,6 +38,7 @@
     reload_timeout: 2700           # 45 min – large chassis can take a while
     commit_delay: 900              # 15 min soak before `install commit`
     backup_dir: "./backups"
+    upgrade_serial: 1              # devices upgraded at once (1 = safest)
 
     # --- MD5 verification (mandatory) ----------------------------------------
     # Expected MD5 of image / tar bundle. Must be set — playbook refuses to
