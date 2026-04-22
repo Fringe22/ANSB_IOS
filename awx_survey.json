@@ -15,18 +15,6 @@
       "new_question": true
     },
     {
-      "question_name": "Base image filename",
-      "question_description": "TAR bundle or ISO filename already staged on the device (e.g. asr9k-x64-24.4.2.1.tar for a TAR bundle, asr9k-x64-24.4.2.1.iso for a plain ISO). Must exist at the chosen image path.",
-      "required": true,
-      "type": "text",
-      "variable": "image_file",
-      "min": 5,
-      "max": 128,
-      "default": "asr9k-x64-24.4.2.1.tar",
-      "choices": "",
-      "new_question": true
-    },
-    {
       "question_name": "Image path on device",
       "question_description": "Filesystem where the image and SMUs are staged.",
       "required": true,
@@ -39,32 +27,20 @@
       "new_question": true
     },
     {
-      "question_name": "SMUs BEFORE upgrade",
-      "question_description": "Optional. One SMU filename per line. Patches the CURRENT image, committed immediately so they survive a version rollback. Node is auto-isolated only if any SMU in the batch requires a reload. Leave empty to skip.",
-      "required": false,
-      "type": "textarea",
-      "variable": "smus_before",
-      "min": 0,
-      "max": 4096,
-      "default": "",
+      "question_name": "Base image filename",
+      "question_description": "TAR bundle or ISO filename already staged on the device (e.g. asr9k-x64-24.4.2.1.tar). Must exist at the chosen image path above.",
+      "required": true,
+      "type": "text",
+      "variable": "image_file",
+      "min": 5,
+      "max": 128,
+      "default": "asr9k-x64-24.4.2.1.tar",
       "choices": "",
       "new_question": true
     },
     {
-      "question_name": "SMUs AFTER upgrade",
-      "question_description": "Optional. One SMU filename per line. Applied on top of the NEW version; committed atomically with the version upgrade. If any SMU in this batch requires reload, the node is re-isolated. Leave empty to skip.",
-      "required": false,
-      "type": "textarea",
-      "variable": "smus_after",
-      "min": 0,
-      "max": 4096,
-      "default": "",
-      "choices": "",
-      "new_question": true
-    },
-    {
-      "question_name": "Expected MD5 of image file",
-      "question_description": "32-char lowercase hex. Playbook runs `show md5 file` on the device and asserts it matches before `install add`. REQUIRED — generate with `md5sum {image_file}` on the file server.",
+      "question_name": "Image file MD5",
+      "question_description": "32-char hex hash of the image file. Verified on-device before install. Generate with `md5sum <filename>` on the file server.",
       "required": true,
       "type": "text",
       "variable": "image_file_md5",
@@ -75,8 +51,20 @@
       "new_question": true
     },
     {
-      "question_name": "Expected MD5s for SMUs-BEFORE (YAML map)",
-      "question_description": "YAML mapping of SMU filename → expected MD5. Example:\n  asr9k-sysadmin-install-7.8.2.2-r782.CSCwi95358.x86_64.rpm: 6cb3873222ec7803ab7e2107551f3f5c\n  asr9k-iosxr-install-1.0.0.2-r782.CSCwi95358.x86_64.rpm: 9fd66427f14de49eb7d651aca9abfc86\nREQUIRED if 'SMUs BEFORE upgrade' is non-empty — one entry per filename, 32-char lowercase hex values. Playbook refuses to proceed if SMUs are listed without matching MD5s.",
+      "question_name": "SMUs BEFORE upgrade (one per line)",
+      "question_description": "Patches the CURRENT image before the version jump. Committed immediately so they survive a rollback. Leave empty to skip.",
+      "required": false,
+      "type": "textarea",
+      "variable": "smus_before",
+      "min": 0,
+      "max": 4096,
+      "default": "",
+      "choices": "",
+      "new_question": true
+    },
+    {
+      "question_name": "SMUs BEFORE — MD5 map (YAML)",
+      "question_description": "One line per SMU, format: filename: md5hash. REQUIRED when SMUs BEFORE is non-empty. Example:\n  asr9k-sysadmin-install-7.8.2.2-r782.CSCwi95358.x86_64.rpm: 6cb3873222ec7803ab7e2107551f3f5c",
       "required": false,
       "type": "textarea",
       "variable": "smus_before_md5",
@@ -87,8 +75,20 @@
       "new_question": true
     },
     {
-      "question_name": "Expected MD5s for SMUs-AFTER (YAML map)",
-      "question_description": "YAML mapping of SMU filename → expected MD5. Same format as the SMUs-BEFORE MD5 map. REQUIRED if 'SMUs AFTER upgrade' is non-empty — one entry per filename. Playbook refuses to proceed if SMUs are listed without matching MD5s.",
+      "question_name": "SMUs AFTER upgrade (one per line)",
+      "question_description": "Applied on top of the NEW image. Committed atomically with the version upgrade at the end. Leave empty to skip.",
+      "required": false,
+      "type": "textarea",
+      "variable": "smus_after",
+      "min": 0,
+      "max": 4096,
+      "default": "",
+      "choices": "",
+      "new_question": true
+    },
+    {
+      "question_name": "SMUs AFTER — MD5 map (YAML)",
+      "question_description": "One line per SMU, format: filename: md5hash. REQUIRED when SMUs AFTER is non-empty.",
       "required": false,
       "type": "textarea",
       "variable": "smus_after_md5",
@@ -99,8 +99,8 @@
       "new_question": true
     },
     {
-      "question_name": "Run DISK-PREP phase (core file + inactive package cleanup)",
-      "question_description": "Cleans up core files under /misc/disk1 and removes inactive install packages on both XR and admin planes before the upgrade. Strongly recommended.",
+      "question_name": "Run DISK-PREP phase",
+      "question_description": "Remove core files and inactive packages from XR + admin planes before upgrade. Recommended.",
       "required": false,
       "type": "multiplechoice",
       "variable": "disk_prep_enabled",
@@ -111,8 +111,8 @@
       "new_question": true
     },
     {
-      "question_name": "Run FPD-PREP phase (disable FPD auto-upgrade/reload)",
-      "question_description": "Disables `fpd auto-upgrade` and `fpd auto-reload` on both XR and sysadmin planes before the image install, so FPD changes are operator-controlled in the FPD phase.",
+      "question_name": "Run FPD-PREP phase",
+      "question_description": "Disable FPD auto-upgrade/auto-reload before the image install so FPD changes are controlled in the FPD phase.",
       "required": false,
       "type": "multiplechoice",
       "variable": "fpd_prep_enabled",
@@ -124,7 +124,7 @@
     },
     {
       "question_name": "Run FPD upgrade phase",
-      "question_description": "After image install, run `upgrade hw-module location all fpd all` and optionally the sequenced per-card upgrades below.",
+      "question_description": "After image install, upgrade all FPDs (sequenced first if listed, then bulk).",
       "required": false,
       "type": "multiplechoice",
       "variable": "fpd_upgrade_enabled",
@@ -135,8 +135,8 @@
       "new_question": true
     },
     {
-      "question_name": "FPD admin reload required after upgrade",
-      "question_description": "Whether to run `admin hw-module location all reload` after FPD upgrades complete. Required for BIOS-class FPD changes.",
+      "question_name": "FPD admin reload after upgrade",
+      "question_description": "Run `admin hw-module location all reload` after FPD upgrades. Required for BIOS-class FPD changes.",
       "required": false,
       "type": "multiplechoice",
       "variable": "fpd_reload_required",
@@ -148,7 +148,7 @@
     },
     {
       "question_name": "Sequenced FPD upgrades (YAML list)",
-      "question_description": "For field-notice-driven ordering (e.g. FN74306 on 4HG-FLEX). YAML list of {location, fpd} items in required order. Each is upgraded and polled until CURRENT before the next runs. Example:\n  - { location: \"0/1\", fpd: \"Sunstreaker\" }\n  - { location: \"0/1\", fpd: \"TAMFW-Sunstreaker\" }\n  - { location: \"0/1\", fpd: \"Primary-BIOS\" }\nLeave as [] to skip sequenced stage and go straight to bulk upgrade.",
+      "question_description": "Field-notice-driven FPD ordering. Each upgraded and verified CURRENT before the next. Example:\n  - { location: \"0/1\", fpd: \"Sunstreaker\" }\n  - { location: \"0/1\", fpd: \"Primary-BIOS\" }\nLeave as [] to skip.",
       "required": false,
       "type": "textarea",
       "variable": "fpd_sequenced_upgrades",
@@ -160,7 +160,7 @@
     },
     {
       "question_name": "Reload timeout (seconds)",
-      "question_description": "Maximum wait for the device to return after a reload. Increase for large/multi-RP chassis.",
+      "question_description": "Max wait for SSH to return after a reload. Increase for large chassis.",
       "required": false,
       "type": "integer",
       "variable": "reload_timeout",
@@ -172,7 +172,7 @@
     },
     {
       "question_name": "Commit soak delay (seconds)",
-      "question_description": "Time between POST checks passing and `install commit`. Gives operators a window to observe and abort before the upgrade becomes permanent.",
+      "question_description": "Pause between POST checks passing and `install commit`. Window to observe and abort.",
       "required": false,
       "type": "integer",
       "variable": "commit_delay",
@@ -183,8 +183,8 @@
       "new_question": true
     },
     {
-      "question_name": "Local backup directory (on AWX worker)",
-      "question_description": "Where pre/post state snapshots are written on the AWX execution node. Use a persistent mount if you want them preserved across job runs.",
+      "question_name": "Backup directory (on AWX worker)",
+      "question_description": "Where pre/post state snapshots are saved. Use a persistent mount to keep across job runs.",
       "required": false,
       "type": "text",
       "variable": "backup_dir",
