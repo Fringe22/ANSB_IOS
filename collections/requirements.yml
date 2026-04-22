@@ -1,0 +1,8 @@
+---
+collections:
+  - name: cisco.iosxr
+    version: ">=9.0.0"
+  - name: ansible.netcommon
+    version: ">=7.0.0"
+  - name: awx.awx
+    version: ">=24.0.0"

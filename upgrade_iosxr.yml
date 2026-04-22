@@ -1,0 +1,1061 @@
+---
+# ============================================================================
+# Cisco IOS XR Upgrade Playbook
+# ----------------------------------------------------------------------------
+# Method       : install add / prepare / activate / commit  (modern XR7/eXR)
+# Image source : Already staged on device (e.g. harddisk:/)
+# Safety       : serial:1, pre-checks, baseline snapshot, soak, post-checks,
+#                delayed commit (rollback-capable until `install commit`)
+#
+# Required collection:
+#   ansible-galaxy collection install cisco.iosxr
+#
+# Usage:
+#   ansible-playbook -i inventory.yml upgrade_iosxr.yml \
+#       -e target_version=7.11.2 \
+#       -e image_file=asr9k-x64-24.4.2.1.tar
+#
+#   Dry-run pre-checks only:
+#       ansible-playbook ... --tags pre
+# ============================================================================
+
+- name: Cisco IOS XR Upgrade
+  hosts: iosxr_devices
+  gather_facts: false
+  serial: 1                        # upgrade one device at a time
+  any_errors_fatal: true           # stop the batch if any host fails a check
+
+  vars:
+    # --- Override these on the CLI or in group_vars/host_vars ---
+    # NOTE: `target_version` must match EXACTLY what `show install active
+    # summary` prints on the Label: line after upgrade. XR 24.x typically
+    # shows 3-octet labels (e.g. "24.4.2"); if you use a 4-octet build
+    # ("24.4.2.1") verify on one device first that the label renders that
+    # way — otherwise the POST assertion will fail even on a good upgrade.
+    target_version: "24.4.2.1"
+    image_file:      "asr9k-x64-24.4.2.1.tar"
+    image_path: "harddisk:"        # trailing slash added where needed
+    reload_timeout: 2700           # 45 min – large chassis can take a while
+    commit_delay: 900              # 15 min soak before `install commit`
+    backup_dir: "./backups"
+
+    # --- MD5 verification (mandatory) ----------------------------------------
+    # Expected MD5 of image / tar bundle. Must be set — playbook refuses to
+    # proceed without a valid 32-char hex hash. Override in group_vars or survey.
+    image_file_md5: ""             # e.g. "7174dd5a5cf7952209b67602e038af0d"
+    # Expected MD5s for SMUs, keyed by filename. Keys MUST match smus_* list.
+    smus_before_md5: {}            # e.g. {"asr9k-sysadmin-install-...rpm": "6cb3873..."}
+    smus_after_md5:  {}
+
+    # --- SMU handling ----------------------------------------------------
+    smus_before: []
+    smus_after:  []
+
+    # --- Disk preparation (DISK-PREP phase) -------------------------------
+    # Remove core dumps and inactive packages before the upgrade to free
+    # space and reduce install risk. Done in BOTH XR and admin planes.
+    disk_prep_enabled: true
+    # Paths to scan for core files. /misc/disk1 is the typical XR 64-bit
+    # location; adjust if your platform differs.
+    core_dump_paths:
+      - /misc/disk1
+      - /misc/scratch
+
+    # --- FPD management (FPD-PREP + FPD phases) ---------------------------
+    # Disable FPD auto-upgrade / auto-reload before the image install so
+    # the upgrade path is controlled and deterministic.
+    fpd_prep_enabled: true
+    # Run FPD upgrades after the image install, before SMU-AFTER.
+    fpd_upgrade_enabled: true
+    # Ordered list of FPDs that need a specific upgrade sequence per a
+    # field notice (e.g. FN74306 on 4HG-FLEX: Sunstreaker → TAMFW-Sunstreaker
+    # → Primary-BIOS at a specific location). Items applied in list order,
+    # each waited-for before the next. Leave empty to skip sequenced stage
+    # and go straight to the bulk `upgrade hw-module location all fpd all`.
+    # Example (host_vars/pe1.yml):
+    #   fpd_sequenced_upgrades:
+    #     - { location: "0/1", fpd: "Sunstreaker" }
+    #     - { location: "0/1", fpd: "TAMFW-Sunstreaker" }
+    #     - { location: "0/1", fpd: "Primary-BIOS" }
+    fpd_sequenced_upgrades: []
+    # Run `admin hw-module location all reload` after FPD upgrades.
+    fpd_reload_required: true
+    # Timeout for each individual FPD upgrade (seconds).
+    fpd_upgrade_timeout: 1800      # 30 min per FPD
+
+  tasks:
+
+    # ========================================================================
+    # INIT — normalize survey-style textarea input into the native types the
+    # rest of the playbook expects. When run from CLI with `-e '{"...":...}'`
+    # these are already the right type and this block is a no-op.
+    #
+    #   smus_before / smus_after           : newline string  → list
+    #   smus_before_md5 / smus_after_md5   : YAML map string → dict
+    #   fpd_sequenced_upgrades             : YAML list string → list[dict]
+    #   disk_prep_enabled / fpd_*_enabled  : "true"/"false" string → bool
+    # ========================================================================
+    - name: "INIT | Normalize SMU lists (string-from-survey → list)"
+      ansible.builtin.set_fact:
+        smus_before: >-
+          {{ (smus_before.splitlines() | map('trim') | reject('equalto', '') | list)
+             if (smus_before is string) else smus_before }}
+        smus_after: >-
+          {{ (smus_after.splitlines() | map('trim') | reject('equalto', '') | list)
+             if (smus_after is string) else smus_after }}
+      tags: [always]
+
+    - name: "INIT | Normalize MD5 maps (YAML string-from-survey → dict)"
+      ansible.builtin.set_fact:
+        smus_before_md5: >-
+          {{ (smus_before_md5 | from_yaml) if (smus_before_md5 is string) else smus_before_md5 }}
+        smus_after_md5: >-
+          {{ (smus_after_md5  | from_yaml) if (smus_after_md5  is string) else smus_after_md5 }}
+      tags: [always]
+
+    - name: "INIT | Normalize FPD sequenced list (YAML string-from-survey → list)"
+      ansible.builtin.set_fact:
+        fpd_sequenced_upgrades: >-
+          {{ (fpd_sequenced_upgrades | from_yaml)
+             if (fpd_sequenced_upgrades is string) else fpd_sequenced_upgrades }}
+      tags: [always]
+
+    - name: "INIT | Normalize boolean toggles (string 'true'/'false' → bool)"
+      ansible.builtin.set_fact:
+        disk_prep_enabled:   "{{ disk_prep_enabled   | bool }}"
+        fpd_prep_enabled:    "{{ fpd_prep_enabled    | bool }}"
+        fpd_upgrade_enabled: "{{ fpd_upgrade_enabled | bool }}"
+        fpd_reload_required: "{{ fpd_reload_required | bool }}"
+      tags: [always]
+
+    # ========================================================================
+    # PRE-CHECKS
+    # ========================================================================
+    - name: "PRE | Ensure local backup directory exists"
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      run_once: true
+      tags: [pre]
+
+    - name: "PRE | Gather IOS XR facts"
+      cisco.iosxr.iosxr_facts:
+        gather_subset: all
+      register: pre_facts
+      tags: [pre]
+
+    - name: "PRE | Abort if device already runs target version"
+      ansible.builtin.assert:
+        that:
+          - pre_facts.ansible_facts.ansible_net_version != target_version
+        fail_msg: "Already on {{ target_version }} – skipping."
+        success_msg: "Running {{ pre_facts.ansible_facts.ansible_net_version }} → upgrading to {{ target_version }}"
+      tags: [pre]
+
+    - name: "PRE | Verify staged image exists on device"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "dir {{ image_path }}/{{ image_file }}"
+      register: image_check
+      failed_when: >
+        ('No such file' in (image_check.stdout[0] | default(''))) or
+        ('Error' in (image_check.stdout[0] | default('')))
+      tags: [pre]
+
+    - name: "PRE | Capture baseline operational state"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show version                          # [0]
+          - show install committed summary        # [1]
+          - show install active summary           # [2]
+          - admin show install active summary     # [3]
+          - show platform                         # [4]
+          - show interfaces description           # [5]
+          - show ipv4 interface brief             # [6]
+          - show route                            # [7]
+          - show isis adjacency                   # [8]
+          - show isis topology                    # [9]
+          - show bgp l2vpn evpn summary           # [10]
+          - show bgp l2vpn evpn                   # [11]
+          - show ntp status                       # [12]
+      register: baseline
+      tags: [pre]
+
+    # Alarms are not in the main capture list but must still gate the upgrade.
+    # Captured as a separate command so the main baseline snapshot matches
+    # exactly what the verification runbook specifies.
+    - name: "PRE | Capture active system alarms (gating only, not in baseline set)"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show alarms brief system active
+      register: pre_alarms
+      tags: [pre]
+
+    - name: "PRE | Save baseline snapshot locally"
+      ansible.builtin.copy:
+        content: |
+          # ==============================================================
+          # Pre-upgrade baseline for {{ inventory_hostname }}
+          # Captured  : {{ lookup('pipe','date -u +%FT%TZ') }}
+          # Version   : {{ pre_facts.ansible_facts.ansible_net_version }}
+          # Target    : {{ target_version }}
+          # ==============================================================
+          {% set cmds = [
+              'show version',
+              'show install committed summary',
+              'show install active summary',
+              'admin show install active summary',
+              'show platform',
+              'show interfaces description',
+              'show ipv4 interface brief',
+              'show route',
+              'show isis adjacency',
+              'show isis topology',
+              'show bgp l2vpn evpn summary',
+              'show bgp l2vpn evpn',
+              'show ntp status',
+          ] %}
+          {% for i in range(cmds | length) %}
+          ==============================================================
+          # {{ cmds[i] }}
+          ==============================================================
+          {{ baseline.stdout[i] }}
+          {% endfor %}
+          ==============================================================
+          # show alarms brief system active
+          ==============================================================
+          {{ pre_alarms.stdout[0] }}
+        dest: "{{ backup_dir }}/{{ inventory_hostname }}_pre_{{ lookup('pipe','date -u +%Y%m%dT%H%M%SZ') }}.txt"
+        mode: "0640"
+      delegate_to: localhost
+      tags: [pre]
+
+    # --- Strict neighbour membership capture ------------------------------
+    # Parsed out of the main baseline set (indices 8 and 10) so UN-ISOLATE
+    # can wait until every baseline neighbour is back before POST runs.
+    #
+    # `show isis adjacency` → state column is literal "Up"
+    # `show bgp l2vpn evpn summary` → Established state is indicated by a
+    #   numeric prefix-count in the final column (not the word "Established")
+    # ----------------------------------------------------------------------
+    - name: "PRE | Extract set of Up IS-IS adjacencies"
+      ansible.builtin.set_fact:
+        isis_neighbors_before: >-
+          {{ baseline.stdout[8]
+             | regex_findall('(?m)^(\S+)\s+\S+\s+\S+\s+Up\s')
+             | unique | list }}
+      tags: [pre]
+
+    - name: "PRE | Extract set of Established EVPN BGP peers"
+      ansible.builtin.set_fact:
+        bgp_neighbors_before: >-
+          {{ baseline.stdout[10]
+             | regex_findall('(?m)^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s*$')
+             | unique | list }}
+      tags: [pre]
+
+    - name: "PRE | Report baseline neighbour snapshot"
+      ansible.builtin.debug:
+        msg:
+          - "EVPN BGP peers Established ({{ bgp_neighbors_before | length }}): {{ bgp_neighbors_before }}"
+          - "IS-IS adjacencies Up       ({{ isis_neighbors_before | length }}): {{ isis_neighbors_before }}"
+      tags: [pre]
+
+    - name: "PRE | Assert at least one BGP + IS-IS neighbour exists at baseline"
+      ansible.builtin.assert:
+        that:
+          - bgp_neighbors_before | length > 0
+          - isis_neighbors_before | length > 0
+        fail_msg: >-
+          Baseline has zero EVPN BGP peers or IS-IS adjacencies — refusing to
+          proceed. Either the device is already isolated, parsing failed, or
+          the node is not in its normal operational state. Investigate before
+          upgrading.
+      tags: [pre]
+
+    - name: "PRE | Assert platform is healthy (all nodes in IOS XR RUN)"
+      ansible.builtin.assert:
+        that:
+          - "'IOS XR RUN' in baseline.stdout[4] or 'OPERATIONAL' in baseline.stdout[4]"
+          - "'Not Ready' not in baseline.stdout[4]"
+        fail_msg: "Platform is not fully operational – aborting."
+      tags: [pre]
+
+    - name: "PRE | Assert NTP is synchronised"
+      ansible.builtin.assert:
+        that:
+          - "'Clock is synchronized' in baseline.stdout[12] or 'synchronised' in baseline.stdout[12]"
+        fail_msg: "NTP is not synchronised – check clock before upgrade."
+      tags: [pre]
+
+    - name: "PRE | Check for pending install operations"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show install request
+      register: pre_install_request
+      tags: [pre]
+
+    - name: "PRE | Assert install subsystem is clean"
+      ansible.builtin.assert:
+        that:
+          - baseline.stdout[1] | length > 0
+          - baseline.stdout[2] | length > 0
+          - "'No install operation in progress' in pre_install_request.stdout[0] or
+             'None' in pre_install_request.stdout[0]"
+        fail_msg: >-
+          Install subsystem not in a clean state — either output is empty
+          or a pending operation was detected. Run `show install request`
+          on the device and clear any stale operations before upgrading.
+      tags: [pre]
+
+    - name: "PRE | Assert no active critical/major alarms"
+      ansible.builtin.assert:
+        that:
+          - "'Critical' not in pre_alarms.stdout[0]"
+          - "'Major' not in pre_alarms.stdout[0]"
+        fail_msg: "Device has active critical/major alarms – clear before upgrade."
+      tags: [pre]
+
+    # ========================================================================
+    # DISK-PREP — free up disk space before the big install
+    #   1. Remove core dumps from XR plane and admin plane
+    #   2. Remove inactive installed packages from both planes
+    # Runs before ISOLATE since neither step disrupts forwarding.
+    # Skipped with `disk_prep_enabled: false`.
+    # ========================================================================
+    - name: "DISK-PREP | (XR) Inventory core files"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "run ls -la {{ item }}/*core* 2>/dev/null || echo 'no cores in {{ item }}'"
+      loop: "{{ core_dump_paths }}"
+      register: xr_core_list
+      when: disk_prep_enabled | bool
+      failed_when: false
+      tags: [disk_prep]
+
+    - name: "DISK-PREP | (XR) Report core files found"
+      ansible.builtin.debug:
+        msg: "{{ item.stdout[0] }}"
+      loop: "{{ xr_core_list.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('') }}"
+      when: disk_prep_enabled | bool
+      tags: [disk_prep]
+
+    - name: "DISK-PREP | (XR) Remove core files"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "run rm -f {{ item }}/*core* 2>/dev/null; echo done"
+      loop: "{{ core_dump_paths }}"
+      when: disk_prep_enabled | bool
+      failed_when: false
+      tags: [disk_prep]
+
+    - name: "DISK-PREP | (Admin) Inventory core files"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "admin run ls -la {{ item }}/*core* 2>/dev/null || echo 'no cores in admin {{ item }}'"
+      loop: "{{ core_dump_paths }}"
+      register: admin_core_list
+      when: disk_prep_enabled | bool
+      failed_when: false
+      tags: [disk_prep]
+
+    - name: "DISK-PREP | (Admin) Remove core files"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "admin run rm -f {{ item }}/*core* 2>/dev/null; echo done"
+      loop: "{{ core_dump_paths }}"
+      when: disk_prep_enabled | bool
+      failed_when: false
+      tags: [disk_prep]
+
+    - name: "DISK-PREP | (XR) Show inactive install packages"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show install inactive summary
+      register: xr_inactive_before
+      when: disk_prep_enabled | bool
+      tags: [disk_prep]
+
+    - name: "DISK-PREP | (XR) Remove all inactive packages"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - install remove inactive all synchronous
+      register: xr_inactive_remove
+      when: disk_prep_enabled | bool
+      failed_when: >-
+        disk_prep_enabled | bool and
+        (xr_inactive_remove.stdout is defined) and
+        ('Error' in xr_inactive_remove.stdout[0] or 'failed' in xr_inactive_remove.stdout[0] | lower)
+      tags: [disk_prep]
+
+    - name: "DISK-PREP | (XR) Commit inactive removal"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - install commit synchronous
+      when: disk_prep_enabled | bool
+      tags: [disk_prep]
+
+    - name: "DISK-PREP | (Admin) Show inactive install packages"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - admin show install inactive summary
+      register: admin_inactive_before
+      when: disk_prep_enabled | bool
+      failed_when: false
+      tags: [disk_prep]
+
+    - name: "DISK-PREP | (Admin) Remove all inactive packages"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - admin install remove inactive all synchronous
+      when: disk_prep_enabled | bool
+      failed_when: false
+      tags: [disk_prep]
+
+    - name: "DISK-PREP | (Admin) Commit inactive removal"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - admin install commit
+      when: disk_prep_enabled | bool
+      failed_when: false
+      tags: [disk_prep]
+
+    # ========================================================================
+    # FPD-PREP — disable FPD auto-upgrade/auto-reload BEFORE the image
+    # install, so FPD changes happen in the dedicated FPD phase after the
+    # main install, under operator control.
+    # Skipped with `fpd_prep_enabled: false`.
+    # ========================================================================
+    - name: "FPD-PREP | (XR) Disable FPD auto-upgrade and auto-reload"
+      cisco.iosxr.iosxr_config:
+        lines:
+          - fpd auto-upgrade disable
+          - fpd auto-reload disable
+        commit_comment: "Pre-upgrade: disable FPD auto-upgrade/reload (XR plane)"
+      when: fpd_prep_enabled | bool
+      tags: [fpd_prep]
+
+    - name: "FPD-PREP | (Admin) Disable FPD auto-upgrade in sysadmin config"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - command: "admin"
+          - command: "config"
+          - command: "fpd auto-upgrade disable"
+          - command: "commit"
+          - command: "end"
+          - command: "exit"
+      when: fpd_prep_enabled | bool
+      failed_when: false           # admin mode transitions are fiddly; best-effort
+      tags: [fpd_prep]
+
+    - name: "FPD-PREP | Verify FPD auto-upgrade is now disabled"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show running-config fpd
+      register: fpd_prep_verify
+      when: fpd_prep_enabled | bool
+      tags: [fpd_prep]
+
+    - name: "FPD-PREP | Assert fpd auto-upgrade disable is in running-config"
+      ansible.builtin.assert:
+        that:
+          - "'fpd auto-upgrade disable' in fpd_prep_verify.stdout[0]"
+        fail_msg: "FPD auto-upgrade disable not present in XR running-config."
+      when: fpd_prep_enabled | bool
+      tags: [fpd_prep]
+
+    # ========================================================================
+    # ISOLATE – drain the node ONCE at the start of the maintenance window.
+    # Applies before any package operation (SMU or image). Config is
+    # committed on-device so isolation persists across reloads that happen
+    # inside the window (SMU activate, install activate, etc.).
+    #   1. Shut Loopback1  → tears down EVI / iBGP sessions sourced from Lo1
+    #   2. IS-IS overload  → neighbours route around this node
+    # ========================================================================
+    - name: "ISOLATE | Shut Loopback1 (drain BGP/EVI)"
+      cisco.iosxr.iosxr_config:
+        lines:
+          - shutdown
+        parents: interface Loopback1
+        match: line
+        commit_comment: "Maintenance-window isolation: shut Lo1 ({{ target_version }})"
+      tags: [isolate]
+
+    - name: "ISOLATE | Set IS-IS overload bit on 'main'"
+      cisco.iosxr.iosxr_config:
+        lines:
+          - set-overload-bit
+        parents: router isis main
+        commit_comment: "Maintenance-window isolation: IS-IS overload ({{ target_version }})"
+      tags: [isolate]
+
+    - name: "ISOLATE | Wait for BGP sessions to drain"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show bgp sessions
+        wait_for:
+          - "result[0] not contains 'Established'"
+        retries: 20
+        interval: 15
+      register: bgp_drain
+      failed_when: false           # don't abort if a session lingers
+      tags: [isolate]
+
+    - name: "ISOLATE | Confirm IS-IS overload advertised"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show isis | include Overload
+        wait_for:
+          - "result[0] contains 'Overload'"
+        retries: 10
+        interval: 10
+      tags: [isolate]
+
+    - name: "ISOLATE | Settle pause before package work"
+      ansible.builtin.pause:
+        seconds: 60
+      tags: [isolate]
+
+    # ========================================================================
+    # SMU-BEFORE — patch the current image, commit, then proceed to upgrade.
+    # Skipped automatically when `smus_before` is empty. Node is already
+    # isolated; smu_phase.yml only decides reload-vs-restart wait path.
+    # ========================================================================
+    - name: "SMU-BEFORE | Apply SMUs to current image"
+      ansible.builtin.include_tasks: smu_phase.yml
+      vars:
+        smu_list: "{{ smus_before }}"
+        phase_name: "before"
+        commit_immediately: true       # so patches survive a version rollback
+        smu_md5_map: "{{ smus_before_md5 }}"
+      when: smus_before | length > 0
+      tags: [smu_before]
+
+    # ========================================================================
+    # INSTALL – verify MD5, add, prepare, activate (using `sync`/synchronous
+    # keyword so we don't need to poll `show install request` in a loop).
+    # Works the same whether `image_file` is a `.iso` or a `.tar` bundle.
+    # ========================================================================
+    - name: "INSTALL | Verify image file exists on device"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "dir {{ image_path }}/{{ image_file }}"
+      register: image_dir_check
+      failed_when: >
+        ('No such file' in (image_dir_check.stdout[0] | default(''))) or
+        ('Error' in (image_dir_check.stdout[0] | default('')))
+      tags: [install]
+
+    - name: "INSTALL | Assert image MD5 is provided (mandatory)"
+      ansible.builtin.assert:
+        that:
+          - image_file_md5 | length > 0
+          - image_file_md5 | regex_search('^[a-fA-F0-9]{32}$') is not none
+        fail_msg: |
+          image_file_md5 is mandatory but not set (or not a 32-char hex hash).
+            Got: "{{ image_file_md5 }}"
+          Generate with `md5sum {{ image_file }}` on the file server and
+          populate group_vars/iosxr_devices.yml (or the survey field).
+        success_msg: "Image MD5 supplied: {{ image_file_md5 }}"
+      tags: [install]
+
+    - name: "INSTALL | Compute MD5 of image file on device"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "show md5 file /{{ image_path | regex_replace(':$','') }}:/{{ image_file }}"
+      register: image_md5_check
+      tags: [install]
+
+    - name: "INSTALL | Assert image MD5 matches expected"
+      ansible.builtin.assert:
+        that:
+          - (image_md5_check.stdout[0] | regex_search('[a-fA-F0-9]{32}')) | lower == image_file_md5 | lower
+        fail_msg: |
+          MD5 mismatch for {{ image_file }}
+            Got      : {{ image_md5_check.stdout[0] | regex_search('[a-fA-F0-9]{32}') }}
+            Expected : {{ image_file_md5 }}
+          Re-transfer the file and re-run.
+        success_msg: "MD5 OK for {{ image_file }}"
+      tags: [install]
+
+    - name: "INSTALL | install add (synchronous)"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "install add source {{ image_path }} {{ image_file }} synchronous"
+      register: install_add
+      timeout: 1800                 # 30 min; large TAR bundles can take a while
+      tags: [install]
+
+    - name: "INSTALL | Extract install operation ID"
+      ansible.builtin.set_fact:
+        install_op_id: "{{ install_add.stdout[0] | regex_search('[Oo]peration[ :]+([0-9]+)', '\\1') | first }}"
+      tags: [install]
+
+    - name: "INSTALL | Prepare (synchronous — blocks until validated)"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "install prepare id {{ install_op_id }} synchronous"
+      timeout: 1800
+      tags: [install]
+
+    - name: "INSTALL | Activate (synchronous — reloads the device)"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "install activate id {{ install_op_id }} synchronous noprompt"
+      register: install_activate
+      ignore_errors: true           # session drops when device reloads
+      tags: [install]
+
+    - name: "INSTALL | Wait for SSH to go down"
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default(inventory_hostname) }}"
+        port: 22
+        state: stopped
+        timeout: 600
+        delay: 30
+      delegate_to: localhost
+      tags: [install]
+
+    - name: "INSTALL | Wait for SSH to come back up"
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default(inventory_hostname) }}"
+        port: 22
+        state: started
+        timeout: "{{ reload_timeout }}"
+        delay: 60
+      delegate_to: localhost
+      tags: [install]
+
+    - name: "INSTALL | Pause for processes to settle"
+      ansible.builtin.pause:
+        seconds: 180
+      tags: [install]
+
+    # ========================================================================
+    # FPD — upgrade Field-Programmable Devices after the image install,
+    # while the node is still isolated.
+    #
+    # Two stages:
+    #   1. Sequenced upgrades — items in `fpd_sequenced_upgrades` are run
+    #      one at a time in list order, each polled until CURRENT before
+    #      proceeding. Use this for field-notice-driven ordering such as
+    #      FN74306 on 4HG-FLEX (Sunstreaker → TAMFW-Sunstreaker → Primary-BIOS).
+    #   2. Bulk upgrade — `upgrade hw-module location all fpd all` catches
+    #      everything else, followed by `admin hw-module location all reload`
+    #      if fpd_reload_required is true.
+    #
+    # Skipped with `fpd_upgrade_enabled: false`.
+    # ========================================================================
+    - name: "FPD | Show current FPD status (pre)"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show hw-module fpd
+          - show fpd package
+      register: fpd_pre_status
+      when: fpd_upgrade_enabled | bool
+      tags: [fpd]
+
+    - name: "FPD | Report pre-upgrade FPD state"
+      ansible.builtin.debug:
+        msg: "{{ fpd_pre_status.stdout }}"
+      when: fpd_upgrade_enabled | bool
+      tags: [fpd]
+
+    # --- Stage 1: sequenced upgrades (skipped if list is empty) ----------
+    # Each FPD is upgraded and polled to CURRENT before the next starts.
+    # This guarantees field-notice ordering (e.g. FN74306: Sunstreaker must
+    # be CURRENT before TAMFW-Sunstreaker upgrade begins).
+    - name: "FPD | Sequenced upgrade — one FPD at a time, in order"
+      ansible.builtin.include_tasks: fpd_sequenced_single.yml
+      loop: "{{ fpd_sequenced_upgrades }}"
+      loop_control:
+        loop_var: fpd_item
+        label: "{{ fpd_item.location }} / {{ fpd_item.fpd }}"
+      when:
+        - fpd_upgrade_enabled | bool
+        - fpd_sequenced_upgrades | length > 0
+      tags: [fpd]
+
+    # --- Stage 2: bulk upgrade (skipped if upgrade is disabled) ----------
+    - name: "FPD | Bulk upgrade all remaining FPDs"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "admin upgrade hw-module location all fpd all"
+      register: fpd_bulk_upgrade
+      when: fpd_upgrade_enabled | bool
+      timeout: "{{ fpd_upgrade_timeout * 2 }}"
+      tags: [fpd]
+
+    - name: "FPD | Pause to let asynchronous FPD writes flush"
+      ansible.builtin.pause:
+        seconds: 120
+      when: fpd_upgrade_enabled | bool
+      tags: [fpd]
+
+    # --- Stage 3: admin-plane reload if FPDs require it ------------------
+    - name: "FPD | admin hw-module location all reload"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - "admin hw-module location all reload"
+      register: fpd_reload
+      when:
+        - fpd_upgrade_enabled | bool
+        - fpd_reload_required | bool
+      ignore_errors: true           # session drops on reload
+      tags: [fpd]
+
+    - name: "FPD | Wait for SSH to drop (post-FPD reload)"
+      when:
+        - fpd_upgrade_enabled | bool
+        - fpd_reload_required | bool
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default(inventory_hostname) }}"
+        port: 22
+        state: stopped
+        timeout: 600
+        delay: 30
+      delegate_to: localhost
+      tags: [fpd]
+
+    - name: "FPD | Wait for SSH to return (post-FPD reload)"
+      when:
+        - fpd_upgrade_enabled | bool
+        - fpd_reload_required | bool
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default(inventory_hostname) }}"
+        port: 22
+        state: started
+        timeout: "{{ reload_timeout }}"
+        delay: 60
+      delegate_to: localhost
+      tags: [fpd]
+
+    - name: "FPD | Settle pause after reload"
+      ansible.builtin.pause:
+        seconds: 240
+      when:
+        - fpd_upgrade_enabled | bool
+        - fpd_reload_required | bool
+      tags: [fpd]
+
+    # --- Stage 4: verify no FPDs still need upgrade ---------------------
+    - name: "FPD | Show FPD status after upgrade"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show hw-module fpd
+      register: fpd_post_status
+      when: fpd_upgrade_enabled | bool
+      tags: [fpd]
+
+    - name: "FPD | Report post-upgrade FPD state"
+      ansible.builtin.debug:
+        msg: "{{ fpd_post_status.stdout[0] }}"
+      when: fpd_upgrade_enabled | bool
+      tags: [fpd]
+
+    - name: "FPD | Assert no FPDs still show NEED UPGD"
+      ansible.builtin.assert:
+        that:
+          - "'NEED UPGD' not in fpd_post_status.stdout[0]"
+          - "'NEED REL' not in fpd_post_status.stdout[0]"
+        fail_msg: |
+          One or more FPDs still need upgrade or reload after the FPD phase.
+          Inspect `show hw-module fpd` output above. Do NOT proceed to commit.
+        success_msg: "All FPDs are CURRENT after the FPD phase."
+      when: fpd_upgrade_enabled | bool
+      tags: [fpd]
+
+    # ========================================================================
+    # SMU-AFTER — apply SMUs on top of the new version while still isolated.
+    # Skipped automatically when `smus_after` is empty.
+    # commit_immediately=false so the final COMMIT block atomically commits
+    # the version upgrade + these SMUs together; if SMU-after fails, nothing
+    # is committed and the whole thing remains rollback-capable.
+    # ========================================================================
+    - name: "SMU-AFTER | Apply SMUs on top of new image"
+      ansible.builtin.include_tasks: smu_phase.yml
+      vars:
+        smu_list: "{{ smus_after }}"
+        phase_name: "after"
+        commit_immediately: false
+        smu_md5_map: "{{ smus_after_md5 }}"
+      when: smus_after | length > 0
+      tags: [smu_after]
+
+    # ========================================================================
+    # UN-ISOLATE – put the node back into service AFTER all package work.
+    # This is the single point where traffic returns to the node.
+    #   1. Clear IS-IS overload  → node is a valid transit again
+    #   2. no shutdown Lo1       → BGP/EVI sessions come back up
+    # Order matters: clear overload first, then bring Lo1 up, so IS-IS
+    # reconverges before BGP peers start establishing.
+    # ========================================================================
+    - name: "UN-ISOLATE | Clear IS-IS overload bit"
+      cisco.iosxr.iosxr_config:
+        lines:
+          - no set-overload-bit
+        parents: router isis main
+        commit_comment: "End of maintenance window: clear IS-IS overload ({{ target_version }})"
+      tags: [unisolate]
+
+    - name: "UN-ISOLATE | Bring Loopback1 back up"
+      cisco.iosxr.iosxr_config:
+        lines:
+          - no shutdown
+        parents: interface Loopback1
+        match: line
+        commit_comment: "End of maintenance window: Lo1 back up ({{ target_version }})"
+      tags: [unisolate]
+
+    - name: "UN-ISOLATE | Wait for ALL baseline IS-IS adjacencies to reform"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show isis adjacency
+      register: unisolate_isis_poll
+      until: >-
+        (isis_neighbors_before
+          | difference(unisolate_isis_poll.stdout[0]
+               | regex_findall('(?m)^(\S+)\s+\S+\s+\S+\s+Up\s')
+               | unique | list)
+          | length) == 0
+      retries: 40
+      delay: 15
+      tags: [unisolate]
+
+    - name: "UN-ISOLATE | Wait for ALL baseline EVPN BGP peers to re-establish"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show bgp l2vpn evpn summary
+      register: unisolate_bgp_poll
+      until: >-
+        (bgp_neighbors_before
+          | difference(unisolate_bgp_poll.stdout[0]
+               | regex_findall('(?m)^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s*$')
+               | unique | list)
+          | length) == 0
+      retries: 80
+      delay: 15
+      tags: [unisolate]
+
+    - name: "UN-ISOLATE | Compute any still-missing neighbours (should be empty)"
+      ansible.builtin.set_fact:
+        isis_missing_after_unisolate: >-
+          {{ isis_neighbors_before
+             | difference(unisolate_isis_poll.stdout[0]
+                  | regex_findall('(?m)^(\S+)\s+\S+\s+\S+\s+Up\s')
+                  | unique | list) }}
+        bgp_missing_after_unisolate: >-
+          {{ bgp_neighbors_before
+             | difference(unisolate_bgp_poll.stdout[0]
+                  | regex_findall('(?m)^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s*$')
+                  | unique | list) }}
+      tags: [unisolate]
+
+    - name: "UN-ISOLATE | Assert every baseline neighbour is restored before POST"
+      ansible.builtin.assert:
+        that:
+          - isis_missing_after_unisolate | length == 0
+          - bgp_missing_after_unisolate  | length == 0
+        fail_msg: |
+          One or more baseline neighbours did not come back after un-isolation.
+            IS-IS missing : {{ isis_missing_after_unisolate }}
+            BGP   missing : {{ bgp_missing_after_unisolate }}
+          Aborting before POST verification — do NOT commit.
+        success_msg: >-
+          All baseline neighbours restored
+          (IS-IS {{ isis_neighbors_before | length }},
+          BGP {{ bgp_neighbors_before | length }}).
+      tags: [unisolate]
+
+    - name: "UN-ISOLATE | Convergence pause"
+      ansible.builtin.pause:
+        seconds: 120
+      tags: [unisolate]
+
+    # ========================================================================
+    # POST-CHECKS
+    # ========================================================================
+    - name: "POST | Re-gather IOS XR facts"
+      cisco.iosxr.iosxr_facts:
+        gather_subset: all
+      register: post_facts
+      tags: [post]
+
+    - name: "POST | Assert target version is running"
+      ansible.builtin.assert:
+        that:
+          - post_facts.ansible_facts.ansible_net_version == target_version
+        fail_msg: "Version mismatch – got {{ post_facts.ansible_facts.ansible_net_version }}, expected {{ target_version }}"
+        success_msg: "Version OK → {{ target_version }}"
+      tags: [post]
+
+    - name: "POST | Capture post-upgrade state (same command set as PRE)"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show version                          # [0]
+          - show install committed summary        # [1]
+          - show install active summary           # [2]
+          - admin show install active summary     # [3]
+          - show platform                         # [4]
+          - show interfaces description           # [5]
+          - show ipv4 interface brief             # [6]
+          - show route                            # [7]
+          - show isis adjacency                   # [8]
+          - show isis topology                    # [9]
+          - show bgp l2vpn evpn summary           # [10]
+          - show bgp l2vpn evpn                   # [11]
+          - show ntp status                       # [12]
+      register: post_state
+      tags: [post]
+
+    - name: "POST | Capture active system alarms (gating only)"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show alarms brief system active
+      register: post_alarms
+      tags: [post]
+
+    - name: "POST | Save post-upgrade snapshot locally"
+      ansible.builtin.copy:
+        content: |
+          # ==============================================================
+          # Post-upgrade state for {{ inventory_hostname }}
+          # Captured  : {{ lookup('pipe','date -u +%FT%TZ') }}
+          # Version   : {{ post_facts.ansible_facts.ansible_net_version }}
+          # ==============================================================
+          {% set cmds = [
+              'show version',
+              'show install committed summary',
+              'show install active summary',
+              'admin show install active summary',
+              'show platform',
+              'show interfaces description',
+              'show ipv4 interface brief',
+              'show route',
+              'show isis adjacency',
+              'show isis topology',
+              'show bgp l2vpn evpn summary',
+              'show bgp l2vpn evpn',
+              'show ntp status',
+          ] %}
+          {% for i in range(cmds | length) %}
+          ==============================================================
+          # {{ cmds[i] }}
+          ==============================================================
+          {{ post_state.stdout[i] }}
+          {% endfor %}
+          ==============================================================
+          # show alarms brief system active
+          ==============================================================
+          {{ post_alarms.stdout[0] }}
+        dest: "{{ backup_dir }}/{{ inventory_hostname }}_post_{{ lookup('pipe','date -u +%Y%m%dT%H%M%SZ') }}.txt"
+        mode: "0640"
+      delegate_to: localhost
+      tags: [post]
+
+    - name: "POST | Re-extract current neighbour sets"
+      ansible.builtin.set_fact:
+        isis_neighbors_after: >-
+          {{ post_state.stdout[8]
+             | regex_findall('(?m)^(\S+)\s+\S+\s+\S+\s+Up\s')
+             | unique | list }}
+        bgp_neighbors_after: >-
+          {{ post_state.stdout[10]
+             | regex_findall('(?m)^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s*$')
+             | unique | list }}
+      tags: [post]
+
+    - name: "POST | Assert platform healthy after reload"
+      ansible.builtin.assert:
+        that:
+          - "'IOS XR RUN' in post_state.stdout[4] or 'OPERATIONAL' in post_state.stdout[4]"
+          - "'Not Ready' not in post_state.stdout[4]"
+        fail_msg: "Platform did not return to healthy state."
+      tags: [post]
+
+    - name: "POST | Assert NTP is synchronised on new image"
+      ansible.builtin.assert:
+        that:
+          - "'Clock is synchronized' in post_state.stdout[12] or 'synchronised' in post_state.stdout[12]"
+        fail_msg: "NTP not synchronised after upgrade – investigate before commit."
+      tags: [post]
+
+    - name: "POST | Assert install-active summary references target version"
+      ansible.builtin.assert:
+        that:
+          - target_version in post_state.stdout[2] or target_version in post_state.stdout[3]
+        fail_msg: >-
+          Target version {{ target_version }} not present in
+          `show install active summary` — activation may not have landed.
+      tags: [post]
+
+    - name: "POST | Assert every baseline BGP peer is still Established"
+      ansible.builtin.assert:
+        that:
+          - (bgp_neighbors_before | difference(bgp_neighbors_after) | length) == 0
+        fail_msg: >-
+          BGP peers missing after upgrade:
+          {{ bgp_neighbors_before | difference(bgp_neighbors_after) }}
+        success_msg: >-
+          All {{ bgp_neighbors_before | length }} baseline EVPN BGP peers
+          still Established.
+      tags: [post]
+
+    - name: "POST | Assert every baseline IS-IS adjacency is still Up"
+      ansible.builtin.assert:
+        that:
+          - (isis_neighbors_before | difference(isis_neighbors_after) | length) == 0
+        fail_msg: >-
+          IS-IS adjacencies missing after upgrade:
+          {{ isis_neighbors_before | difference(isis_neighbors_after) }}
+        success_msg: >-
+          All {{ isis_neighbors_before | length }} baseline IS-IS adjacencies
+          still Up.
+      tags: [post]
+
+    - name: "POST | Assert no new critical/major alarms"
+      ansible.builtin.assert:
+        that:
+          - "'Critical' not in post_alarms.stdout[0]"
+          - "'Major' not in post_alarms.stdout[0]"
+        fail_msg: "Critical/major alarms present after upgrade – NOT committing."
+      tags: [post]
+
+    - name: "POST | Soak period before commit ({{ commit_delay }}s)"
+      ansible.builtin.pause:
+        seconds: "{{ commit_delay }}"
+      tags: [post]
+
+    # ========================================================================
+    # COMMIT
+    # ========================================================================
+    - name: "COMMIT | install commit (makes upgrade persistent)"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - install commit
+      register: install_commit
+      tags: [commit]
+
+    - name: "COMMIT | Verify committed set"
+      cisco.iosxr.iosxr_command:
+        commands:
+          - show install committed summary
+      register: commit_verify
+      tags: [commit]
+
+    - name: "SUMMARY"
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Host   : {{ inventory_hostname }}"
+          - "Before : {{ pre_facts.ansible_facts.ansible_net_version }}"
+          - "After  : {{ post_facts.ansible_facts.ansible_net_version }}"
+          - "BGP    : {{ bgp_neighbors_before  | length }} → {{ bgp_neighbors_after  | length }} (EVPN peers)"
+          - "IS-IS  : {{ isis_neighbors_before | length }} → {{ isis_neighbors_after | length }} (adjacencies)"
+          - "Status : COMMITTED"
+          - "=========================================="
+      tags: [commit]

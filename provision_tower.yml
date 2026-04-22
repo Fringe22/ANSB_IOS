@@ -1,0 +1,190 @@
+---
+# ============================================================================
+# provision_tower.yml — Infrastructure-as-code for AWX / AAP setup
+# ----------------------------------------------------------------------------
+# Creates the Tower / AAP objects needed to run the IOS XR upgrade as a
+# single Job Template with survey.
+#
+# Runs against the Tower API — NOT against routers. Execute on your Ansible
+# control node or an AAP execution node that has network access to Tower.
+#
+# REQUIREMENTS
+#   pip install awxkit
+#   ansible-galaxy collection install -r collections/requirements.yml
+#
+# CONNECTION TO TOWER (choose one)
+#   A) Environment variables (recommended):
+#        export CONTROLLER_HOST=https://tower.example.com
+#        export CONTROLLER_USERNAME=admin
+#        export CONTROLLER_PASSWORD='...'
+#        # or CONTROLLER_OAUTH_TOKEN=...
+#        export CONTROLLER_VERIFY_SSL=true
+#
+#   B) ~/.tower_cli.cfg / ~/.awx/config.cfg — pre-existing AWX CLI config
+#
+# RUN
+#   ansible-playbook provision_tower.yml
+#
+# IDEMPOTENT — safe to re-run. Updates objects if they exist, creates
+# if they don't.
+# ============================================================================
+
+- name: Provision Tower objects for IOS XR upgrade automation
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    # ----- Organisation & project -----------------------------------------
+    tower_organization: "Default"
+
+    tower_project_name:        "IOS XR Automation"
+    tower_project_scm_url:     "https://git.example.com/netops/iosxr-upgrade.git"  # REPLACE
+    tower_project_scm_branch:  "main"
+    tower_project_scm_type:    "git"
+
+    # ----- Inventory -------------------------------------------------------
+    tower_inventory_name:      "IOS XR devices"
+    tower_inventory_hosts:
+      - { name: "pe1.lab",  ansible_host: "10.0.0.11" }
+      - { name: "pe2.lab",  ansible_host: "10.0.0.12" }
+      - { name: "p1.lab",   ansible_host: "10.0.0.21" }
+      # REPLACE with your real hosts, or synchronise from an inventory source
+
+    tower_inventory_groupvars:
+      ansible_connection:  ansible.netcommon.network_cli
+      ansible_network_os:  cisco.iosxr.iosxr
+      ansible_become:      true
+      ansible_become_method: enable
+      ansible_command_timeout: 120
+      # ansible_user / ansible_password are injected by the Machine Credential
+
+    # ----- Credentials -----------------------------------------------------
+    tower_credential_name:     "iosxr-admin"
+
+    # ----- Job Template ----------------------------------------------------
+    tower_jt_playbook:         "upgrade_iosxr.yml"
+    tower_jt_name:             "IOS XR Upgrade"
+
+    # ----- Survey file (relative to playbook) -----------------------------
+    tower_survey_file:         "awx_survey.json"
+
+  vars_prompt:
+    - name: iosxr_user
+      prompt: "IOS XR admin username"
+      private: false
+      default: "admin"
+    - name: iosxr_password
+      prompt: "IOS XR admin password (stored as Tower Machine Credential)"
+      private: true
+
+  tasks:
+
+    # ========================================================================
+    # FOUNDATION — project, inventory, credentials
+    # ========================================================================
+
+    - name: "Project | Ensure git-backed project exists"
+      awx.awx.project:
+        name: "{{ tower_project_name }}"
+        organization: "{{ tower_organization }}"
+        scm_type: "{{ tower_project_scm_type }}"
+        scm_url: "{{ tower_project_scm_url }}"
+        scm_branch: "{{ tower_project_scm_branch }}"
+        scm_update_on_launch: true
+        scm_clean: true
+        state: present
+
+    - name: "Project | Sync now"
+      awx.awx.project_update:
+        project: "{{ tower_project_name }}"
+        organization: "{{ tower_organization }}"
+        wait: true
+        timeout: 300
+
+    - name: "Inventory | Ensure inventory exists"
+      awx.awx.inventory:
+        name: "{{ tower_inventory_name }}"
+        organization: "{{ tower_organization }}"
+        state: present
+
+    - name: "Inventory | Add/update hosts"
+      awx.awx.host:
+        name: "{{ item.name }}"
+        inventory: "{{ tower_inventory_name }}"
+        variables:
+          ansible_host: "{{ item.ansible_host }}"
+        state: present
+      loop: "{{ tower_inventory_hosts }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: "Inventory | Create 'iosxr_devices' group with connection vars"
+      awx.awx.group:
+        name: "iosxr_devices"
+        inventory: "{{ tower_inventory_name }}"
+        variables: "{{ tower_inventory_groupvars }}"
+        hosts: "{{ tower_inventory_hosts | map(attribute='name') | list }}"
+        state: present
+
+    - name: "Credential | Ensure Machine Credential for IOS XR admin"
+      awx.awx.credential:
+        name: "{{ tower_credential_name }}"
+        organization: "{{ tower_organization }}"
+        credential_type: "Machine"
+        inputs:
+          username: "{{ iosxr_user }}"
+          password: "{{ iosxr_password }}"
+        state: present
+
+    # ========================================================================
+    # SURVEY
+    # ========================================================================
+
+    - name: "Survey | Load survey spec from file"
+      ansible.builtin.set_fact:
+        tower_survey_spec: "{{ lookup('file', tower_survey_file) | from_json }}"
+
+    # ========================================================================
+    # JOB TEMPLATE
+    # ========================================================================
+
+    - name: "Job Template | Ensure Job Template exists"
+      awx.awx.job_template:
+        name: "{{ tower_jt_name }}"
+        organization: "{{ tower_organization }}"
+        project: "{{ tower_project_name }}"
+        playbook: "{{ tower_jt_playbook }}"
+        inventory: "{{ tower_inventory_name }}"
+        credentials:
+          - "{{ tower_credential_name }}"
+        forks: 1
+        verbosity: 1
+        ask_limit_on_launch: true
+        ask_variables_on_launch: true
+        survey_enabled: true
+        survey_spec: "{{ tower_survey_spec }}"
+        state: present
+
+    # ========================================================================
+    # SUMMARY
+    # ========================================================================
+
+    - name: "Summary"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "Tower provisioning complete."
+          - "Project       : {{ tower_project_name }}"
+          - "Inventory     : {{ tower_inventory_name }} ({{ tower_inventory_hosts | length }} hosts)"
+          - "Group         : iosxr_devices"
+          - "Credential    : {{ tower_credential_name }}"
+          - "Job Template  : {{ tower_jt_name }}"
+          - "Survey        : 16 fields from {{ tower_survey_file }}"
+          - ""
+          - "Next steps:"
+          - "  1. Update tower_project_scm_url with your real git repo"
+          - "  2. Update tower_inventory_hosts with your real routers"
+          - "  3. Run: ansible-playbook provision_tower.yml"
+          - "  4. Verify in Tower UI, smoke-test with --tags pre"
+          - "============================================================"

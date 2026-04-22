@@ -1,0 +1,116 @@
+---
+# ============================================================================
+# group_vars/iosxr_devices.yml
+# ----------------------------------------------------------------------------
+# These values apply automatically to every host in the `iosxr_devices`
+# group (see inventory.yml). Because the fleet is homogeneous — same
+# chassis, same line cards, same target version, same SMUs, same FPD
+# requirements — every router inherits the same config. No per-host
+# override files needed.
+#
+# Rolling out to a subset (different maintenance windows are handled here,
+# NOT in vars files — scheduling is a "when", not a "what"):
+#   ansible-playbook -i inventory.yml upgrade_iosxr.yml --limit pe1.lab
+#   ansible-playbook -i inventory.yml upgrade_iosxr.yml --limit 'pe*'
+#   ansible-playbook -i inventory.yml upgrade_iosxr.yml --limit wave1
+#
+# host_vars/ is only needed if a single router genuinely DIFFERS in config
+# from the rest of the fleet (different chassis, different line card mix,
+# temporarily excluded from SMU batch, canary image). A homogeneous fleet
+# typically never needs it.
+# ============================================================================
+
+
+# -----------------------------------------------------------------------------
+# TARGET VERSION + IMAGE BUNDLE
+# -----------------------------------------------------------------------------
+# target_version MUST match exactly what `show install active summary` prints
+# on the Label: line after the upgrade. Confirm on one device post-activate
+# before rolling out fleet-wide.
+target_version: "24.4.2.1"
+
+# TAR bundle (or plain ISO) staged on harddisk: on each router.
+# Example build line for a bundle (mini ISO + optional feature RPMs):
+#   tar -cf asr9k-x64-24.4.2.1.tar \
+#       asr9k-mini-x64-24.4.2.iso \
+#       asr9k-isis-x64-*.rpm \
+#       asr9k-k9sec-x64-*.rpm \
+#       asr9k-mgbl-x64-*.rpm \
+#       asr9k-mpls-x64-*.rpm \
+#       asr9k-mpls-te-rsvp-x64-*.rpm
+# Then SCP to harddisk: on the target router.
+image_file:      "asr9k-x64-24.4.2.1.tar"
+image_file_md5:  ""                                 # REPLACE with md5sum of the new .tar
+image_path:      "harddisk:"
+
+
+# -----------------------------------------------------------------------------
+# SMUs BEFORE — three pre-upgrade sysadmin/install SMUs patched on the
+# CURRENT (7.8.2.x) image before the version jump. Committed immediately so
+# they survive a version rollback.
+# -----------------------------------------------------------------------------
+smus_before:
+  - asr9k-sysadmin-asr9k-7.8.2.4-r782.CSCwh61644.x86_64.rpm
+  - asr9k-sysadmin-install-7.8.2.2-r782.CSCwi95358.x86_64.rpm
+  - asr9k-iosxr-install-1.0.0.2-r782.CSCwi95358.x86_64.rpm
+
+smus_before_md5:
+  asr9k-sysadmin-asr9k-7.8.2.4-r782.CSCwh61644.x86_64.rpm: "6f58dd1f3d1b2df3f1c6c447b2a6f31b"
+  asr9k-sysadmin-install-7.8.2.2-r782.CSCwi95358.x86_64.rpm: "6cb3873222ec7803ab7e2107551f3f5c"
+  asr9k-iosxr-install-1.0.0.2-r782.CSCwi95358.x86_64.rpm: "9fd66427f14de49eb7d651aca9abfc86"
+
+
+# -----------------------------------------------------------------------------
+# SMUs AFTER — post-upgrade SMU applied once on 24.4.2.1. NOT committed by
+# the SMU phase — committed atomically with the version upgrade by the
+# final COMMIT block.
+# -----------------------------------------------------------------------------
+smus_after:
+  - asr9k-sysadmin-install-24.4.2.1-r2442.CSCwq57215.x86_64.rpm
+
+smus_after_md5:
+  asr9k-sysadmin-install-24.4.2.1-r2442.CSCwq57215.x86_64.rpm: "9388c698b52d9f08145a606d09c71915"
+
+
+# -----------------------------------------------------------------------------
+# DISK PREPARATION
+# -----------------------------------------------------------------------------
+disk_prep_enabled: true
+core_dump_paths:
+  - /misc/disk1
+  - /misc/scratch
+
+
+# -----------------------------------------------------------------------------
+# FPD MANAGEMENT
+# -----------------------------------------------------------------------------
+fpd_prep_enabled:    true
+fpd_upgrade_enabled: true
+fpd_reload_required: true
+fpd_upgrade_timeout: 1800        # 30 min per FPD
+
+# Sequenced FPD upgrades for field-notice-driven ordering.
+# FN74306 on 4HG-FLEX line cards in slot 0/1:
+#   Sunstreaker  →  TAMFW-Sunstreaker  →  Primary-BIOS
+# Each is polled to CURRENT before the next runs. The subsequent bulk
+# `upgrade hw-module location all fpd all` picks up everything else.
+#
+# Because every router in the fleet has the same chassis layout, the
+# same slot, and the same line card, this list is identical across hosts.
+fpd_sequenced_upgrades:
+  - { location: "0/1", fpd: "Sunstreaker" }
+  - { location: "0/1", fpd: "TAMFW-Sunstreaker" }
+  - { location: "0/1", fpd: "Primary-BIOS" }
+
+
+# -----------------------------------------------------------------------------
+# TIMING
+# -----------------------------------------------------------------------------
+reload_timeout: 2700             # 45 minutes
+commit_delay:   900              # 15-minute soak before final commit
+
+
+# -----------------------------------------------------------------------------
+# LOCAL SNAPSHOTS
+# -----------------------------------------------------------------------------
+backup_dir: "./backups"

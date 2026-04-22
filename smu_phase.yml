@@ -1,0 +1,202 @@
+---
+# ============================================================================
+# smu_phase.yml  — reusable SMU installation block
+# ----------------------------------------------------------------------------
+# Called twice from the main playbook (before / after version upgrade).
+# ASSUMES the outer playbook has already isolated the node (Lo1 shut,
+# IS-IS overload set). This file does not isolate or un-isolate — it only
+# performs the package operations themselves.
+#
+# Required input vars:
+#   smu_list              : list of SMU .rpm filenames (already on device)
+#   phase_name            : "before" | "after"  (used in labels/comments only)
+#   commit_immediately    : bool — true for SMU-before (patch survives a
+#                           version rollback), false for SMU-after (bundled
+#                           with final version commit).
+#
+# Inherited from play vars:
+#   image_path, reload_timeout
+#
+# Per-SMU restart-type detection:
+#   `show install package <smu> detail` → if ANY SMU in the batch requires
+#   reload, the whole batch takes the reload wait path (SSH drop/up).
+#   Otherwise it takes the op-poll path. The node stays isolated either way.
+# ============================================================================
+
+- name: "SMU-{{ phase_name }} | Verify each SMU file is on device"
+  cisco.iosxr.iosxr_command:
+    commands:
+      - "dir {{ image_path }}/{{ item }}"
+  loop: "{{ smu_list }}"
+  register: smu_file_check
+  failed_when: >
+    ('No such file' in (smu_file_check.stdout[0] | default(''))) or
+    ('Error' in (smu_file_check.stdout[0] | default('')))
+
+- name: "SMU-{{ phase_name }} | Assert MD5 map is populated for every listed SMU"
+  ansible.builtin.assert:
+    that:
+      - (smu_md5_map | default({})) | length > 0
+      - smu_list | difference(smu_md5_map.keys() | list) | length == 0
+      - (smu_md5_map | default({})) | dict2items
+          | selectattr('value', 'match', '^[a-fA-F0-9]{32}$')
+          | list | length == smu_list | length
+    fail_msg: |
+      SMU MD5 verification is mandatory when SMUs are listed.
+        SMUs in list     : {{ smu_list }}
+        SMUs in MD5 map  : {{ (smu_md5_map | default({})).keys() | list }}
+        Missing from map : {{ smu_list | difference((smu_md5_map | default({})).keys() | list) }}
+        Invalid hashes   : {{ (smu_md5_map | default({})) | dict2items
+                               | rejectattr('value', 'match', '^[a-fA-F0-9]{32}$')
+                               | map(attribute='key') | list }}
+      Either populate the MD5 map with one 32-char-hex entry per SMU
+      filename, or clear the SMU list to skip this phase entirely.
+    success_msg: >-
+      MD5 map complete and well-formed
+      ({{ smu_md5_map | length }} hashes for {{ smu_list | length }} SMUs).
+
+- name: "SMU-{{ phase_name }} | Compute MD5 of each SMU file"
+  cisco.iosxr.iosxr_command:
+    commands:
+      - "show md5 file /{{ image_path | regex_replace(':$','') }}:/{{ item }}"
+  loop: "{{ smu_list }}"
+  register: smu_md5_results
+
+- name: "SMU-{{ phase_name }} | Assert MD5 of each SMU matches expected"
+  ansible.builtin.assert:
+    that:
+      - (item.stdout[0] | regex_search('[a-fA-F0-9]{32}')) | lower == smu_md5_map[item.item] | lower
+    fail_msg: |
+      MD5 mismatch for SMU {{ item.item }}
+        Got      : {{ item.stdout[0] | regex_search('[a-fA-F0-9]{32}') | default('(not found in output)') }}
+        Expected : {{ smu_md5_map[item.item] }}
+      Re-transfer the file and re-run.
+    success_msg: "MD5 OK for {{ item.item }}"
+  loop: "{{ smu_md5_results.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: "SMU-{{ phase_name }} | install add (all SMUs in one op, synchronous)"
+  cisco.iosxr.iosxr_command:
+    commands:
+      - "install add source {{ image_path }} {{ smu_list | join(' ') }} synchronous"
+  register: smu_install_add
+  timeout: 1800
+
+- name: "SMU-{{ phase_name }} | Capture install op-id"
+  ansible.builtin.set_fact:
+    smu_op_id: "{{ smu_install_add.stdout[0] | regex_search('[Oo]peration[ :]+([0-9]+)', '\\1') | first }}"
+
+- name: "SMU-{{ phase_name }} | Inspect each SMU's restart type"
+  cisco.iosxr.iosxr_command:
+    commands:
+      - "show install package {{ item }} detail"
+  loop: "{{ smu_list }}"
+  register: smu_restart_details
+
+- name: "SMU-{{ phase_name }} | Determine if any SMU in batch requires reload"
+  ansible.builtin.set_fact:
+    smu_requires_reload: >-
+      {{ (smu_restart_details.results
+           | map(attribute='stdout') | map('first') | list
+           | select('search', 'Restart\\s+[Tt]ype\\s*:\\s*[Rr]eload')
+           | list | length) > 0 }}
+
+- name: "SMU-{{ phase_name }} | Report detected restart profile"
+  ansible.builtin.debug:
+    msg:
+      - "SMUs in this batch : {{ smu_list }}"
+      - "Requires reload   : {{ smu_requires_reload }}"
+      - "Wait path         : {{ 'SSH drop/up (reload)' if smu_requires_reload else 'synchronous activate' }}"
+
+    # ------------------------------------------------------------------------
+    # Prepare & activate (synchronous — no separate poll needed)
+    # ------------------------------------------------------------------------
+- name: "SMU-{{ phase_name }} | install prepare (synchronous)"
+  cisco.iosxr.iosxr_command:
+    commands:
+      - "install prepare id {{ smu_op_id }} synchronous"
+  timeout: 1800
+
+- name: "SMU-{{ phase_name }} | install activate (synchronous)"
+  cisco.iosxr.iosxr_command:
+    commands:
+      - "install activate id {{ smu_op_id }} synchronous noprompt"
+  register: smu_activate
+  ignore_errors: "{{ smu_requires_reload | bool }}"   # session only drops on reload
+  timeout: "{{ reload_timeout }}"
+
+    # ------------------------------------------------------------------------
+    # Wait path A — reload SMUs: monitor SSH. Node comes back still isolated
+    # (Lo1 shut + overload in running-config persist across reload).
+    # ------------------------------------------------------------------------
+- name: "SMU-{{ phase_name }} | Wait for SSH to drop (reload path)"
+  when: smu_requires_reload | bool
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host | default(inventory_hostname) }}"
+    port: 22
+    state: stopped
+    timeout: 600
+    delay: 30
+  delegate_to: localhost
+
+- name: "SMU-{{ phase_name }} | Wait for SSH to return (reload path)"
+  when: smu_requires_reload | bool
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host | default(inventory_hostname) }}"
+    port: 22
+    state: started
+    timeout: "{{ reload_timeout }}"
+    delay: 60
+  delegate_to: localhost
+
+    # ------------------------------------------------------------------------
+    # For process-restart SMUs, `install activate synchronous` has already
+    # blocked until completion, so no extra poll is required here.
+    # ------------------------------------------------------------------------
+- name: "SMU-{{ phase_name }} | Settle pause"
+  ansible.builtin.pause:
+    seconds: "{{ 180 if (smu_requires_reload | bool) else 45 }}"
+
+    # ------------------------------------------------------------------------
+    # Verification & optional commit (no neighbour checks — node is isolated)
+    # ------------------------------------------------------------------------
+- name: "SMU-{{ phase_name }} | Verify SMUs are active"
+  cisco.iosxr.iosxr_command:
+    commands:
+      - show install active summary
+  register: smu_active_check
+
+- name: "SMU-{{ phase_name }} | Assert each SMU appears active"
+  ansible.builtin.assert:
+    that:
+      - "(item | splitext | first) in smu_active_check.stdout[0] or item in smu_active_check.stdout[0]"
+    fail_msg: "SMU {{ item }} not present in active set after activation."
+    success_msg: "SMU {{ item }} active."
+  loop: "{{ smu_list }}"
+
+- name: "SMU-{{ phase_name }} | install commit (SMU-before only)"
+  when: commit_immediately | bool
+  cisco.iosxr.iosxr_command:
+    commands:
+      - install commit
+  register: smu_commit
+
+- name: "SMU-{{ phase_name }} | Verify commit"
+  when: commit_immediately | bool
+  cisco.iosxr.iosxr_command:
+    commands:
+      - show install committed summary
+  register: smu_commit_verify
+
+- name: "SMU-{{ phase_name }} | Phase summary"
+  ansible.builtin.debug:
+    msg:
+      - "================================================"
+      - "Host         : {{ inventory_hostname }}"
+      - "Phase        : SMU-{{ phase_name }}"
+      - "SMUs         : {{ smu_list | join(', ') }}"
+      - "Reload used  : {{ smu_requires_reload }}"
+      - "Committed    : {{ commit_immediately }}"
+      - "Node state   : still isolated (outer playbook handles un-isolation)"
+      - "================================================"

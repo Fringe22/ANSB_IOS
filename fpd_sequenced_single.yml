@@ -1,0 +1,31 @@
+---
+# ============================================================================
+# fpd_sequenced_single.yml — upgrade + verify a SINGLE FPD
+# ----------------------------------------------------------------------------
+# Called in a loop from upgrade_iosxr.yml for field-notice-driven sequenced
+# FPD upgrades (e.g. FN74306 on 4HG-FLEX). Each FPD is upgraded and polled
+# until CURRENT before the outer loop moves to the next one.
+#
+# Required input vars (via loop_var: fpd_item):
+#   fpd_item.location   : e.g. "0/1"
+#   fpd_item.fpd         : e.g. "Sunstreaker"
+#
+# Inherited from play vars:
+#   fpd_upgrade_timeout
+# ============================================================================
+
+- name: "FPD-SEQ | Upgrade {{ fpd_item.fpd }} at {{ fpd_item.location }} (forced)"
+  cisco.iosxr.iosxr_command:
+    commands:
+      - "admin upgrade hw-module location {{ fpd_item.location }} fpd {{ fpd_item.fpd }} force"
+  timeout: "{{ fpd_upgrade_timeout }}"
+
+- name: "FPD-SEQ | Poll until {{ fpd_item.fpd }} at {{ fpd_item.location }} reports CURRENT"
+  cisco.iosxr.iosxr_command:
+    commands:
+      - "admin show hw-module fpd location {{ fpd_item.location }}"
+  register: fpd_single_verify
+  until: >-
+    (fpd_single_verify.stdout[0] | regex_findall(fpd_item.fpd + '\s+.*\s+CURRENT') | length) > 0
+  retries: 40
+  delay: 30

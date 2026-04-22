@@ -1,0 +1,22 @@
+---
+# Example inventory – adjust hosts, credentials, and transport to your env.
+# Credentials are better placed in ansible-vault or env vars.
+
+all:
+  children:
+    iosxr_devices:
+      hosts:
+        pe1.lab:
+          ansible_host: 10.0.0.11
+        pe2.lab:
+          ansible_host: 10.0.0.12
+        p1.lab:
+          ansible_host: 10.0.0.21
+      vars:
+        ansible_connection: ansible.netcommon.network_cli
+        ansible_network_os: cisco.iosxr.iosxr
+        ansible_user: "{{ lookup('env','IOSXR_USER') }}"
+        ansible_password: "{{ lookup('env','IOSXR_PASSWORD') }}"
+        ansible_become: true
+        ansible_become_method: enable
+        ansible_command_timeout: 120
