@@ -86,16 +86,39 @@
   tasks:
 
     # ========================================================================
-    # INIT — normalize survey-style textarea input into the native types the
-    # rest of the playbook expects. When run from CLI with `-e '{"...":...}'`
-    # these are already the right type and this block is a no-op.
+    # INIT — normalize survey input into the native types the rest of the
+    # playbook expects. When run from CLI with `-e '{"...":...}'` and the
+    # values are already the right type, these tasks are no-ops.
     #
-    #   smus_before / smus_after           : newline string  → list
-    #   smus_before_md5 / smus_after_md5   : YAML map string → dict
-    #   fpd_sequenced_upgrades             : YAML list string → list[dict]
-    #   disk_prep_enabled / fpd_*_enabled  : "true"/"false" string → bool
+    # Survey combined format (one textarea per phase):
+    #   smus_before_combined / smus_after_combined :
+    #     "filename.rpm: md5hash\n..."  →  smus_before (list) + smus_before_md5 (dict)
+    #
+    # CLI legacy format (still supported):
+    #   smus_before (list) + smus_before_md5 (dict) passed separately
     # ========================================================================
-    - name: "INIT | Normalize SMU lists (string-from-survey → list)"
+
+    # --- Combined survey fields → split into list + dict ------------------
+    - name: "INIT | Split combined SMU-BEFORE field into list + MD5 map"
+      ansible.builtin.set_fact:
+        smus_before: >-
+          {{ (smus_before_combined | from_yaml | default({}) ).keys() | list }}
+        smus_before_md5: >-
+          {{ smus_before_combined | from_yaml | default({}) }}
+      when: smus_before_combined is defined and smus_before_combined | length > 0
+      tags: [always]
+
+    - name: "INIT | Split combined SMU-AFTER field into list + MD5 map"
+      ansible.builtin.set_fact:
+        smus_after: >-
+          {{ (smus_after_combined | from_yaml | default({}) ).keys() | list }}
+        smus_after_md5: >-
+          {{ smus_after_combined | from_yaml | default({}) }}
+      when: smus_after_combined is defined and smus_after_combined | length > 0
+      tags: [always]
+
+    # --- Legacy CLI format: normalize if passed as separate vars ----------
+    - name: "INIT | Normalize SMU lists (legacy string → list)"
       ansible.builtin.set_fact:
         smus_before: >-
           {{ (smus_before.splitlines() | map('trim') | reject('equalto', '') | list)
@@ -103,24 +126,26 @@
         smus_after: >-
           {{ (smus_after.splitlines() | map('trim') | reject('equalto', '') | list)
              if (smus_after is string) else smus_after }}
+      when: smus_before_combined is not defined
       tags: [always]
 
-    - name: "INIT | Normalize MD5 maps (YAML string-from-survey → dict)"
+    - name: "INIT | Normalize MD5 maps (legacy YAML string → dict)"
       ansible.builtin.set_fact:
         smus_before_md5: >-
           {{ (smus_before_md5 | from_yaml) if (smus_before_md5 is string) else smus_before_md5 }}
         smus_after_md5: >-
           {{ (smus_after_md5  | from_yaml) if (smus_after_md5  is string) else smus_after_md5 }}
+      when: smus_before_combined is not defined
       tags: [always]
 
-    - name: "INIT | Normalize FPD sequenced list (YAML string-from-survey → list)"
+    - name: "INIT | Normalize FPD sequenced list (YAML string → list)"
       ansible.builtin.set_fact:
         fpd_sequenced_upgrades: >-
           {{ (fpd_sequenced_upgrades | from_yaml)
              if (fpd_sequenced_upgrades is string) else fpd_sequenced_upgrades }}
       tags: [always]
 
-    - name: "INIT | Normalize boolean toggles (string 'true'/'false' → bool)"
+    - name: "INIT | Normalize boolean toggles (string → bool)"
       ansible.builtin.set_fact:
         disk_prep_enabled:   "{{ disk_prep_enabled   | bool }}"
         fpd_prep_enabled:    "{{ fpd_prep_enabled    | bool }}"
