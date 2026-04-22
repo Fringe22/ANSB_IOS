@@ -3,6 +3,18 @@
   "description": "Upgrade a Cisco IOS XR device using the install add/activate workflow. Optional SMU batches may be applied before and/or after the version upgrade. Restart type (reload vs process-restart) is auto-detected per SMU.",
   "spec": [
     {
+      "question_name": "Parallel upgrades",
+      "question_description": "How many devices to upgrade at once. '1' = one at a time (safest). Higher values run that many in parallel.",
+      "required": false,
+      "type": "multiplechoice",
+      "variable": "upgrade_serial",
+      "min": 0,
+      "max": 1024,
+      "default": "1",
+      "choices": "1\n2\n3\n5\n10",
+      "new_question": true
+    },
+    {
       "question_name": "Target IOS XR version",
       "question_description": "Must match `show install active summary` Label: line exactly after upgrade.",
       "required": true,
@@ -132,18 +144,6 @@
       "max": 4096,
       "default": "[]",
       "choices": "",
-      "new_question": true
-    },
-    {
-      "question_name": "Parallel upgrades",
-      "question_description": "How many devices to upgrade at once. '1' = one at a time (safest). Higher values run that many in parallel.",
-      "required": false,
-      "type": "multiplechoice",
-      "variable": "upgrade_serial",
-      "min": 0,
-      "max": 1024,
-      "default": "1",
-      "choices": "1\n2\n3\n5\n10",
       "new_question": true
     },
     {
