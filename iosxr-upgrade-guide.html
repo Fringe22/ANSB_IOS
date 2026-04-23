@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IOS-XR Upgrade Guide - ASR9K with Ansible + AWX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1B2A4A; color: #FFFFFF; line-height: 1.6; font-size: 14px; }
+        header { background: linear-gradient(135deg, #1B2A4A 0%, #0F1A2E 100%); border-bottom: 4px solid #049FD9; padding: 40px 20px; text-align: center; }
+        .cisco-logo { font-size: 24px; font-weight: bold; color: #049FD9; margin-bottom: 10px; letter-spacing: 2px; }
+        h1 { font-size: 36px; margin-bottom: 10px; }
+        .subtitle { font-size: 16px; color: #B0C4DE; margin-bottom: 5px; }
+        .document-meta { font-size: 12px; color: #7A8FA3; margin-top: 15px; padding-top: 15px; border-top: 1px solid #049FD9; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 40px 20px; }
+        nav.toc { background-color: #0F1A2E; border: 2px solid #049FD9; border-radius: 8px; padding: 25px; margin-bottom: 40px; }
+        nav.toc h2 { color: #049FD9; margin-bottom: 15px; font-size: 18px; }
+        nav.toc ol { margin-left: 20px; }
+        nav.toc li { margin-bottom: 8px; }
+        nav.toc a { color: #B0C4DE; text-decoration: none; }
+        nav.toc a:hover { color: #049FD9; text-decoration: underline; }
+        section { margin-bottom: 50px; background-color: #0F1A2E; border-left: 4px solid #049FD9; padding: 30px; border-radius: 8px; }
+        h2 { color: #049FD9; font-size: 28px; margin-bottom: 20px; cursor: pointer; user-select: none; display: flex; align-items: center; }
+        h2 .toggle-icon { display: inline-block; width: 24px; height: 24px; margin-right: 12px; background-color: #049FD9; color: #1B2A4A; border-radius: 4px; text-align: center; line-height: 24px; font-weight: bold; transition: transform 0.3s ease; }
+        h2.collapsed .toggle-icon { transform: rotate(-90deg); }
+        .section-content { max-height: 10000px; overflow: hidden; transition: max-height 0.3s ease; }
+        h2.collapsed + .section-content { max-height: 0; }
+        h3 { color: #049FD9; font-size: 20px; margin-top: 25px; margin-bottom: 15px; }
+        h4 { color: #B0C4DE; font-size: 16px; margin-top: 15px; margin-bottom: 10px; }
+        p { margin-bottom: 15px; color: #E8EEF5; line-height: 1.8; }
+        ul, ol { margin-left: 25px; margin-bottom: 15px; }
+        li { margin-bottom: 8px; color: #E8EEF5; }
+        strong { color: #049FD9; font-weight: 600; }
+        code { background-color: #1B2A4A; color: #7FFF7F; padding: 2px 6px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 13px; }
+        pre { background-color: #1B2A4A; border: 1px solid #049FD9; border-radius: 6px; padding: 15px; overflow-x: auto; margin-bottom: 15px; color: #7FFF7F; font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.5; }
+        .warning-box { background-color: #2A1B1B; border-left: 4px solid #FF6B6B; padding: 15px; margin: 15px 0; border-radius: 4px; }
+        .success-box { background-color: #1B2A1B; border-left: 4px solid #51CF66; padding: 15px; margin: 15px 0; border-radius: 4px; }
+        .highlight-box { background-color: #1B2A4A; border-left: 4px solid #049FD9; padding: 15px; margin: 15px 0; border-radius: 4px; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; background-color: #1B2A4A; border: 1px solid #049FD9; border-radius: 6px; overflow: hidden; }
+        thead { background-color: #049FD9; color: #1B2A4A; }
+        th { padding: 12px; text-align: left; font-weight: 600; }
+        td { padding: 12px; border-bottom: 1px solid #2A3F5F; color: #E8EEF5; }
+        tbody tr:hover { background-color: #0F1A2E; }
+        .step-number { display: inline-block; background-color: #049FD9; color: #1B2A4A; width: 30px; height: 30px; border-radius: 50%; text-align: center; line-height: 30px; font-weight: bold; margin-right: 10px; }
+        .step-box { background-color: #1B2A4A; border-left: 4px solid #049FD9; padding: 15px; margin: 15px 0; border-radius: 4px; }
+        .diagram { background-color: #1B2A4A; border: 2px solid #049FD9; border-radius: 6px; padding: 20px; margin: 20px 0; font-family: monospace; color: #7FFF7F; overflow-x: auto; white-space: pre; line-height: 1.4; }
+        footer { background-color: #0F1A2E; border-top: 4px solid #049FD9; padding: 30px 20px; text-align: center; color: #7A8FA3; margin-top: 50px; }
+        .reference-link { color: #049FD9; text-decoration: none; }
+        .reference-link:hover { color: #B0C4DE; text-decoration: underline; }
+        @media (max-width: 768px) { h1 { font-size: 24px; } h2 { font-size: 20px; } section { padding: 20px; } }
+        @media print {
+            body { background-color: #fff; color: #000; }
+            section, nav.toc, .highlight-box, .warning-box, .success-box, .step-box, .diagram { background-color: #fff; color: #000; border-color: #000; page-break-inside: avoid; }
+            h2, h3, h4, strong, .step-number, th { color: #000; }
+            code, pre { background-color: #F5F5F5; color: #000; border-color: #000; }
+            header, footer { background: #fff; border-color: #000; color: #000; }
+            h2 .toggle-icon { display: none; }
+            .section-content { max-height: none !important; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="cisco-logo">CISCO ASR9K</div>
+        <h1>IOS-XR Upgrade &amp; SMU Patching Guide</h1>
+        <p class="subtitle">Ansible + AWX Automation for ASR9K (7.8.2.x &rarr; 24.4.2.1)</p>
+        <div class="document-meta">
+            <p><strong>Platform:</strong> Cisco ASR9K (Single RSP5) | <strong>Line Cards:</strong> A99-4HG-FLEX-TR | <strong>Method:</strong> install add / prepare / activate / commit (synchronous)</p>
+            <p><strong>Automation:</strong> Ansible + AWX/AAP | <strong>Repo:</strong> ANSB_IOS | <strong>Last Updated:</strong> April 2026</p>
+        </div>
+    </header>
+
+    <div class="container">
+        <nav class="toc">
+            <h2>Table of Contents</h2>
+            <ol>
+                <li><a href="#overview">Overview &amp; Safety Model</a></li>
+                <li><a href="#phases">The 13 Phases</a></li>
+                <li><a href="#isolation">Traffic Isolation (ISOLATE / UN-ISOLATE)</a></li>
+                <li><a href="#md5">MD5 Verification</a></li>
+                <li><a href="#install">Install Workflow (synchronous + operation ID)</a></li>
+                <li><a href="#smu">SMU Patching</a></li>
+                <li><a href="#fpd">FPD Management</a></li>
+                <li><a href="#rollback">Rollback (Automatic + Manual)</a></li>
+                <li><a href="#pre-checks">Pre-Check Baseline</a></li>
+                <li><a href="#post-checks">Post-Check Verification</a></li>
+                <li><a href="#survey">AWX Survey (14 Fields)</a></li>
+                <li><a href="#awx-setup">AWX / AAP Setup</a></li>
+                <li><a href="#files">Project Files</a></li>
+                <li><a href="#troubleshooting">Troubleshooting</a></li>
+                <li><a href="#references">References</a></li>
+            </ol>
+        </nav>
+
+        <!-- Section 1: Overview -->
+        <section id="overview">
+            <h2><span class="toggle-icon">&minus;</span>Overview &amp; Safety Model</h2>
+            <div class="section-content">
+                <p>This playbook upgrades Cisco ASR9K routers from IOS XR 7.8.2.x to 24.4.2.1, one device at a time (configurable to parallel), with full rollback capability until the final <code>install commit</code>.</p>
+
+                <div class="warning-box">
+                    <h3 style="color: #FF6B6B; margin-top: 0;">SINGLE RSP5 &mdash; FULL RELOAD REQUIRED</h3>
+                    <ul>
+                        <li><strong style="color: #FF6B6B;">ISSU NOT SUPPORTED</strong> &mdash; single RSP means no graceful switchover</li>
+                        <li><strong style="color: #FF6B6B;">TRAFFIC IMPACT</strong> &mdash; all upgrades require a maintenance window</li>
+                        <li><strong style="color: #FF6B6B;">RELOAD TIME</strong> &mdash; 15&ndash;20 minutes per reload (install activate, FPD, SMU)</li>
+                    </ul>
+                </div>
+
+                <h3>Safety Guarantees</h3>
+                <div class="success-box">
+                    <ul>
+                        <li><strong>Rollback-safe:</strong> Everything before <code>install commit</code> (phase 13) is reversible</li>
+                        <li><strong>MD5 mandatory:</strong> Every image file and every SMU is hash-verified on-device before install</li>
+                        <li><strong>Traffic isolation:</strong> Node is drained (IS-IS overload + Loopback1 shutdown) before any package work</li>
+                        <li><strong>Neighbor set verification:</strong> Every specific baseline IS-IS adjacency and EVPN BGP peer must return after un-isolation</li>
+                        <li><strong>Automatic rollback:</strong> block/rescue wraps all destructive phases &mdash; failure triggers <code>install rollback to committed</code>, un-isolates, and reports</li>
+                        <li><strong>Soak period:</strong> 15-minute configurable window between POST checks and commit</li>
+                    </ul>
+                </div>
+
+                <h3>Workflow Diagram</h3>
+                <div class="diagram">
+PRE-CHECKS &rarr; DISK-PREP &rarr; FPD-PREP &rarr; ISOLATE
+                                          |
+                            +----- BLOCK (auto-rollback on failure) -----+
+                            |                                             |
+                            |  SMU-BEFORE &rarr; INSTALL &rarr; FPD &rarr; SMU-AFTER  |
+                            |         |                                   |
+                            |         v                                   |
+                            |  UN-ISOLATE &rarr; POST-CHECKS &rarr; SOAK        |
+                            |                                             |
+                            +---------------------------------------------+
+                                          |
+                                     failure? &rarr; RESCUE (rollback + un-isolate)
+                                          |
+                                       COMMIT</div>
+            </div>
+        </section>
+
+        <!-- Section 2: The 13 Phases -->
+        <section id="phases">
+            <h2><span class="toggle-icon">&minus;</span>The 13 Phases</h2>
+            <div class="section-content">
+                <table>
+                    <thead>
+                        <tr><th>#</th><th>Phase</th><th>Tag</th><th>What Happens</th><th>Destructive?</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>1</td><td>INIT</td><td><code>always</code></td><td>Normalizes survey inputs into native types</td><td>No</td></tr>
+                        <tr><td>2</td><td>PRE-CHECKS</td><td><code>pre</code></td><td>Baseline snapshot, NTP, alarms, platform health, pending ops, BGP/IS-IS neighbor capture</td><td>No</td></tr>
+                        <tr><td>3</td><td>DISK-PREP</td><td><code>disk_prep</code></td><td>Remove core files + inactive packages (XR and admin planes)</td><td>No (cleanup)</td></tr>
+                        <tr><td>4</td><td>FPD-PREP</td><td><code>fpd_prep</code></td><td>Disable <code>fpd auto-upgrade</code> / <code>auto-reload</code></td><td>No (config)</td></tr>
+                        <tr><td>5</td><td>ISOLATE</td><td><code>isolate</code></td><td><code>shutdown Loopback1</code> + <code>set-overload-bit</code>, wait for BGP drain</td><td>Yes (traffic drain)</td></tr>
+                        <tr><td>6</td><td>SMU-BEFORE</td><td><code>smu_before</code></td><td>MD5 verify &rarr; add &rarr; prepare &rarr; activate &rarr; commit</td><td>Yes (in block)</td></tr>
+                        <tr><td>7</td><td>INSTALL</td><td><code>install</code></td><td>MD5 verify each file &rarr; <code>install add/prepare/activate synchronous</code> &rarr; reload wait</td><td>Yes (in block)</td></tr>
+                        <tr><td>8</td><td>FPD</td><td><code>fpd</code></td><td>Sequenced FPD upgrades (one at a time) &rarr; bulk &rarr; admin reload</td><td>Yes (in block)</td></tr>
+                        <tr><td>9</td><td>SMU-AFTER</td><td><code>smu_after</code></td><td>MD5 verify &rarr; add &rarr; prepare &rarr; activate (not committed)</td><td>Yes (in block)</td></tr>
+                        <tr><td>10</td><td>UN-ISOLATE</td><td><code>unisolate</code></td><td>Clear overload &rarr; no-shut Lo1 &rarr; wait for ALL baseline neighbors</td><td>Yes (in block)</td></tr>
+                        <tr><td>11</td><td>POST-CHECKS</td><td><code>post</code></td><td>Assert version, neighbor sets, NTP, platform, alarms</td><td>No (in block)</td></tr>
+                        <tr><td>12</td><td>SOAK</td><td><code>post</code></td><td><code>commit_delay</code> seconds &mdash; operator window to observe/abort</td><td>No (in block)</td></tr>
+                        <tr><td>13</td><td>COMMIT</td><td><code>commit</code></td><td><code>install commit</code> &mdash; version + SMU-after committed atomically</td><td>Point of no return</td></tr>
+                    </tbody>
+                </table>
+
+                <div class="highlight-box">
+                    <strong>Phases 6&ndash;12 are wrapped in block/rescue.</strong> Any failure triggers automatic rollback: <code>install rollback to committed</code>, SSH wait, un-isolate, report, fail the play.
+                </div>
+
+                <h3>Tags for Partial Runs</h3>
+                <table>
+                    <thead><tr><th>Command</th><th>Behavior</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>--tags pre</code></td><td>Dry-run baseline check only</td></tr>
+                        <tr><td><code>--tags pre,disk_prep</code></td><td>Safe pre-upgrade hygiene</td></tr>
+                        <tr><td><code>--tags isolate</code></td><td>Drain only (manual maintenance)</td></tr>
+                        <tr><td><code>--tags unisolate</code></td><td>Restore only (recovery)</td></tr>
+                        <tr><td><code>--skip-tags commit</code></td><td>Everything through POST, stops at soak</td></tr>
+                        <tr><td><code>--skip-tags smu_before,smu_after</code></td><td>Version upgrade only, no SMUs</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 3: Traffic Isolation -->
+        <section id="isolation">
+            <h2><span class="toggle-icon">&minus;</span>Traffic Isolation (ISOLATE / UN-ISOLATE)</h2>
+            <div class="section-content">
+                <p>Before any package work, the node is gracefully drained so neighbors route around it. This prevents hard forwarding failure during reload.</p>
+
+                <h3>ISOLATE (before package work)</h3>
+                <div class="step-box">
+                    <p><span class="step-number">1</span><strong>Shut Loopback1</strong> &mdash; tears down EVI / iBGP sessions sourced from Lo1</p>
+                    <pre>interface Loopback1
+ shutdown
+ commit comment "Maintenance-window isolation: shut Lo1"</pre>
+                </div>
+                <div class="step-box">
+                    <p><span class="step-number">2</span><strong>Set IS-IS overload</strong> &mdash; neighbors route around this node</p>
+                    <pre>router isis main
+ set-overload-bit
+ commit comment "Maintenance-window isolation: IS-IS overload"</pre>
+                </div>
+                <div class="step-box">
+                    <p><span class="step-number">3</span><strong>Wait for BGP drain</strong> &mdash; poll <code>show bgp sessions</code> until no Established sessions (up to 5 min)</p>
+                </div>
+                <div class="step-box">
+                    <p><span class="step-number">4</span><strong>Confirm IS-IS overload advertised</strong> &mdash; <code>show isis | include Overload</code></p>
+                </div>
+
+                <div class="highlight-box">
+                    <strong>Isolation persists across reloads.</strong> The <code>shutdown</code> and <code>set-overload-bit</code> are committed to running-config, so they survive SMU-activate and install-activate reloads inside the maintenance window. UN-ISOLATE explicitly reverses them.
+                </div>
+
+                <h3>UN-ISOLATE (after all package work)</h3>
+                <div class="step-box">
+                    <p><span class="step-number">1</span><strong>Clear IS-IS overload</strong> (first, so IS-IS reconverges before BGP)</p>
+                    <pre>router isis main
+ no set-overload-bit</pre>
+                </div>
+                <div class="step-box">
+                    <p><span class="step-number">2</span><strong>No-shut Loopback1</strong></p>
+                    <pre>interface Loopback1
+ no shutdown</pre>
+                </div>
+                <div class="step-box">
+                    <p><span class="step-number">3</span><strong>Wait for ALL baseline IS-IS adjacencies to return</strong> (set-based, not count-based)</p>
+                    <pre># Polls until: (baseline_neighbors - current_neighbors) == empty set
+# Retries: 40 x 15s = 10 minutes max</pre>
+                </div>
+                <div class="step-box">
+                    <p><span class="step-number">4</span><strong>Wait for ALL baseline EVPN BGP peers to re-establish</strong></p>
+                    <pre># Polls until: (baseline_peers - current_peers) == empty set
+# Retries: 80 x 15s = 20 minutes max</pre>
+                </div>
+
+                <div class="warning-box">
+                    <strong>Set-based, not count-based.</strong> The playbook captures the exact set of IS-IS neighbors and BGP peers at baseline, then asserts every specific one returns. If you lose neighbor A and gain neighbor B, counts match but ANSB_IOS catches this.
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 4: MD5 Verification -->
+        <section id="md5">
+            <h2><span class="toggle-icon">&minus;</span>MD5 Verification</h2>
+            <div class="section-content">
+                <p>Every file &mdash; image files (TAR or individual RPMs) and SMUs &mdash; must have a pre-supplied MD5 hash verified on-device before any install operation.</p>
+
+                <h3>How It Works</h3>
+                <ol>
+                    <li>Operator provides <code>filename: md5hash</code> pairs in the AWX survey (or group_vars)</li>
+                    <li>Playbook asserts every listed file has a valid 32-char hex MD5</li>
+                    <li>On-device: <code>show md5 file /harddisk:/&lt;filename&gt;</code></li>
+                    <li>Assert computed MD5 matches expected &mdash; abort if mismatch</li>
+                </ol>
+
+                <h3>Survey Format</h3>
+                <p>Image files and SMUs both use the same combined format (one line per file):</p>
+                <pre># Image files (single TAR)
+asr9k-x64-24.4.2.1.tar: 7174dd5a5cf7952209b67602e038af0d
+
+# Or individual RPMs
+asr9k-mini-x64-24.4.2.iso: 7174dd5a5cf7952209b67602e038af0d
+asr9k-isis-x64-2.4.2.1-r2442.x86_64.rpm: 3fa8b2c1e9a04d7f8b6c2e1a5d9f3b7c
+
+# SMUs BEFORE
+asr9k-sysadmin-asr9k-7.8.2.4-r782.CSCwh61644.x86_64.rpm: 6f58dd1f3d1b2df3f1c6c447b2a6f31b
+asr9k-sysadmin-install-7.8.2.2-r782.CSCwi95358.x86_64.rpm: 6cb3873222ec7803ab7e2107551f3f5c</pre>
+
+                <h3>IOS XR MD5 Command</h3>
+                <pre>RP/0/RSP0/CPU0:router# show md5 file /harddisk:/asr9k-x64-24.4.2.1.tar
+7174dd5a5cf7952209b67602e038af0d</pre>
+
+                <div class="highlight-box">
+                    <strong>Generate MD5s on the file server before staging:</strong>
+                    <pre>md5sum asr9k-x64-24.4.2.1.tar
+md5sum asr9k-sysadmin-*.rpm</pre>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 5: Install Workflow -->
+        <section id="install">
+            <h2><span class="toggle-icon">&minus;</span>Install Workflow (synchronous + operation ID)</h2>
+            <div class="section-content">
+                <p>The playbook uses <code>synchronous</code> keyword and operation-ID tracking &mdash; no polling loops needed.</p>
+
+                <h3>Step-by-Step</h3>
+
+                <div class="step-box">
+                    <p><span class="step-number">1</span><strong>install add</strong> &mdash; extracts packages from TAR/ISO on device (pre-staged on <code>harddisk:</code>)</p>
+                    <pre>install add source harddisk: asr9k-x64-24.4.2.1.tar synchronous
+# Returns: "Install operation 42 started..."</pre>
+                    <p><strong>Key difference from other approaches:</strong> images are pre-staged on <code>harddisk:</code>, not pulled from TFTP during the window. No dependency on external file servers.</p>
+                </div>
+
+                <div class="step-box">
+                    <p><span class="step-number">2</span><strong>Extract operation ID</strong> &mdash; parsed from install add output</p>
+                    <pre># Regex: Operation[ :]+([0-9]+) &rarr; "42"
+# Used for prepare and activate to reference the exact operation</pre>
+                </div>
+
+                <div class="step-box">
+                    <p><span class="step-number">3</span><strong>install prepare</strong> &mdash; validates packages, non-disruptive</p>
+                    <pre>install prepare id 42 synchronous
+# Blocks until validation complete. Fails on incompatibility.</pre>
+                </div>
+
+                <div class="step-box">
+                    <p><span class="step-number">4</span><strong>install activate</strong> &mdash; triggers reload</p>
+                    <pre>install activate id 42 synchronous noprompt
+# SSH session drops. Device reloads.</pre>
+                </div>
+
+                <div class="step-box">
+                    <p><span class="step-number">5</span><strong>Wait for reload</strong> &mdash; two-phase SSH monitoring</p>
+                    <pre># Phase A: wait_for port 22 state=stopped  (confirm SSH went DOWN)
+# Phase B: wait_for port 22 state=started  (confirm SSH came BACK)
+# Then: 180s settle pause for processes to initialize</pre>
+                    <div class="warning-box">
+                        <strong>Both phases matter.</strong> Without checking SSH went down first, the playbook could proceed before the reload started (SSH still up from old session).
+                    </div>
+                </div>
+
+                <div class="step-box">
+                    <p><span class="step-number">6</span><strong>install commit</strong> (phase 13, after POST + soak)</p>
+                    <pre>install commit
+# Makes upgrade permanent. Point of no return.</pre>
+                </div>
+
+                <h3>Why <code>synchronous</code>?</h3>
+                <ul>
+                    <li>CLI blocks until the operation completes &mdash; no polling <code>show install request</code> in a loop</li>
+                    <li>Eliminates race conditions between poll intervals</li>
+                    <li>Ansible task finishes when the IOS XR operation finishes</li>
+                    <li><code>noprompt</code> suppresses the "Continue?" confirmation</li>
+                </ul>
+
+                <h3>Why operation ID (not name)?</h3>
+                <ul>
+                    <li><code>install prepare id 42</code> is unambiguous &mdash; references exactly the operation that just ran</li>
+                    <li>Name-based (<code>install prepare asr9k-mini-x64-24.4.2</code>) can match wrong version if multiple are in repository</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Section 6: SMU Patching -->
+        <section id="smu">
+            <h2><span class="toggle-icon">&minus;</span>SMU Patching</h2>
+            <div class="section-content">
+                <p>SMUs are applied in two windows: <strong>BEFORE</strong> the version upgrade (committed immediately) and <strong>AFTER</strong> (committed atomically with the version).</p>
+
+                <h3>SMU-BEFORE (phase 6)</h3>
+                <ul>
+                    <li>Patches the <strong>current</strong> image (e.g., 7.8.2.x)</li>
+                    <li>Committed immediately so they survive a version rollback</li>
+                    <li>Example: CSCwh61644, CSCwi95358 (sysadmin/install fixes)</li>
+                </ul>
+
+                <h3>SMU-AFTER (phase 9)</h3>
+                <ul>
+                    <li>Applied on top of the <strong>new</strong> image (24.4.2.1)</li>
+                    <li>NOT committed &mdash; bundled with <code>install commit</code> at phase 13</li>
+                    <li>If SMU-after fails, nothing is committed &mdash; full rollback is safe</li>
+                </ul>
+
+                <h3>Per-SMU Processing (<code>smu_phase.yml</code>)</h3>
+                <ol>
+                    <li>MD5 verify each SMU file on device</li>
+                    <li><code>install add source harddisk: smu1.rpm smu2.rpm smu3.rpm synchronous</code> (batch)</li>
+                    <li>Extract operation ID</li>
+                    <li>Detect restart type: <code>show install package &lt;smu&gt; detail</code> &rarr; "Restart Type: Reload" or "Restart Type: Restart"</li>
+                    <li><code>install prepare id &lt;N&gt; synchronous</code></li>
+                    <li><code>install activate id &lt;N&gt; synchronous noprompt</code></li>
+                    <li>If reload: wait for SSH down/up. If process-restart: activate blocks until done.</li>
+                    <li>Verify each SMU in active set</li>
+                    <li>Commit (SMU-BEFORE only)</li>
+                </ol>
+
+                <div class="highlight-box">
+                    <strong>Batch add, single activate.</strong> All SMUs in a phase are added in one <code>install add</code> command, then prepared and activated together. Faster and handles inter-dependencies correctly.
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 7: FPD Management -->
+        <section id="fpd">
+            <h2><span class="toggle-icon">&minus;</span>FPD Management</h2>
+            <div class="section-content">
+                <p>Field-Programmable Device upgrades run after the image install, while the node is still isolated.</p>
+
+                <h3>FPD-PREP (phase 4)</h3>
+                <p>Disables automatic FPD behavior before the image install:</p>
+                <pre>fpd auto-upgrade disable
+fpd auto-reload disable</pre>
+                <p>Applied in both XR and sysadmin config planes. Verified via <code>show running-config fpd</code>.</p>
+
+                <h3>FPD Upgrade (phase 8)</h3>
+                <h4>Stage 1: Sequenced upgrades (field-notice-driven)</h4>
+                <p>For FN74306 on 4HG-FLEX, each FPD must be upgraded and verified CURRENT before the next starts:</p>
+                <pre># Example sequence (slot 0/1):
+1. admin upgrade hw-module location 0/1 fpd Sunstreaker force
+   &rarr; poll until CURRENT
+2. admin upgrade hw-module location 0/1 fpd TAMFW-Sunstreaker force
+   &rarr; poll until CURRENT
+3. admin upgrade hw-module location 0/1 fpd Primary-BIOS force
+   &rarr; poll until CURRENT</pre>
+                <p>Uses <code>fpd_sequenced_single.yml</code> with <code>include_tasks</code> loop &mdash; upgrade + poll per FPD.</p>
+
+                <h4>Stage 2: Bulk upgrade</h4>
+                <pre>admin upgrade hw-module location all fpd all</pre>
+
+                <h4>Stage 3: Admin reload</h4>
+                <pre>admin hw-module location all reload
+# SSH drops, wait for reload (same two-phase SSH monitoring)</pre>
+
+                <h4>Stage 4: Verify</h4>
+                <pre>show hw-module fpd
+# Assert: no "NEED UPGD" or "NEED REL" in output</pre>
+            </div>
+        </section>
+
+        <!-- Section 8: Rollback -->
+        <section id="rollback">
+            <h2><span class="toggle-icon">&minus;</span>Rollback (Automatic + Manual)</h2>
+            <div class="section-content">
+                <h3>Automatic Rollback (block/rescue)</h3>
+                <p>Phases 6&ndash;12 are wrapped in <code>block/rescue</code>. If any task fails:</p>
+                <ol>
+                    <li>Record failure details (task name + error message)</li>
+                    <li>Report failure to job output</li>
+                    <li><code>install rollback to committed noprompt</code></li>
+                    <li>Wait for SSH down/up (rollback triggers reload)</li>
+                    <li>180s settle pause</li>
+                    <li>Un-isolate: clear IS-IS overload + no-shut Loopback1</li>
+                    <li>Verify rollback version</li>
+                    <li>Report rollback summary</li>
+                    <li>Fail the play (stops the batch via <code>any_errors_fatal</code>)</li>
+                </ol>
+
+                <div class="success-box">
+                    <strong>After automatic rollback:</strong> the node is back in service on the old image, un-isolated, with neighbors recovering. The operator gets a clear summary of what failed and what to check.
+                </div>
+
+                <h3>Manual Rollback (before <code>install commit</code>)</h3>
+                <pre>admin install rollback to committed</pre>
+                <p>Device reloads to the previously-committed image. Then manually un-isolate:</p>
+                <pre>configure
+ router isis main
+  no set-overload-bit
+ interface Loopback1
+  no shutdown
+commit
+end</pre>
+
+                <h3>Manual Rollback (after <code>install commit</code>)</h3>
+                <pre>install rollback to &lt;old-label&gt;     # e.g. 7.8.2
+install commit</pre>
+                <p>Same maintenance-window rules apply &mdash; isolate first, verify neighbors return.</p>
+            </div>
+        </section>
+
+        <!-- Section 9: Pre-Check Baseline -->
+        <section id="pre-checks">
+            <h2><span class="toggle-icon">&minus;</span>Pre-Check Baseline</h2>
+            <div class="section-content">
+                <h3>Commands Captured (13 in one batch)</h3>
+                <table>
+                    <thead><tr><th>#</th><th>Command</th><th>Purpose</th></tr></thead>
+                    <tbody>
+                        <tr><td>0</td><td><code>show version</code></td><td>Current version</td></tr>
+                        <tr><td>1</td><td><code>show install committed summary</code></td><td>Committed packages</td></tr>
+                        <tr><td>2</td><td><code>show install active summary</code></td><td>Active packages</td></tr>
+                        <tr><td>3</td><td><code>admin show install active summary</code></td><td>Admin-plane packages</td></tr>
+                        <tr><td>4</td><td><code>show platform</code></td><td>Node health (IOS XR RUN)</td></tr>
+                        <tr><td>5</td><td><code>show interfaces description</code></td><td>Interface status</td></tr>
+                        <tr><td>6</td><td><code>show ipv4 interface brief</code></td><td>IP addressing</td></tr>
+                        <tr><td>7</td><td><code>show route</code></td><td>Routing table</td></tr>
+                        <tr><td>8</td><td><code>show isis adjacency</code></td><td>IS-IS neighbors (set extracted)</td></tr>
+                        <tr><td>9</td><td><code>show isis topology</code></td><td>IS-IS topology</td></tr>
+                        <tr><td>10</td><td><code>show bgp l2vpn evpn summary</code></td><td>EVPN BGP peers (set extracted)</td></tr>
+                        <tr><td>11</td><td><code>show bgp l2vpn evpn</code></td><td>EVPN routes</td></tr>
+                        <tr><td>12</td><td><code>show ntp status</code></td><td>Clock sync</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Assertions (gates &mdash; abort if failed)</h3>
+                <ul>
+                    <li>Not already on target version</li>
+                    <li>All image files exist on device</li>
+                    <li>Platform healthy (IOS XR RUN, no Not Ready)</li>
+                    <li>NTP synchronized</li>
+                    <li>No pending install operations (<code>show install request</code>)</li>
+                    <li>No critical/major alarms</li>
+                    <li>At least one IS-IS neighbor + one EVPN BGP peer at baseline</li>
+                </ul>
+
+                <h3>Snapshot Saved</h3>
+                <p>Full output of all 13 commands + alarms saved to <code>./backups/&lt;hostname&gt;_pre_&lt;timestamp&gt;.txt</code> on the AWX worker for post-hoc diffing.</p>
+            </div>
+        </section>
+
+        <!-- Section 10: Post-Check Verification -->
+        <section id="post-checks">
+            <h2><span class="toggle-icon">&minus;</span>Post-Check Verification</h2>
+            <div class="section-content">
+                <p>Same 13 commands re-captured. Assertions verify the upgrade landed correctly:</p>
+
+                <table>
+                    <thead><tr><th>Check</th><th>Method</th></tr></thead>
+                    <tbody>
+                        <tr><td>Target version running</td><td><code>iosxr_facts.ansible_net_version == target_version</code> (exact equality)</td></tr>
+                        <tr><td>Version in active summary</td><td><code>target_version in show install active summary</code></td></tr>
+                        <tr><td>Platform healthy</td><td><code>IOS XR RUN</code> present, <code>Not Ready</code> absent</td></tr>
+                        <tr><td>NTP synchronized</td><td><code>Clock is synchronized</code> in ntp status</td></tr>
+                        <tr><td>Every baseline BGP peer Established</td><td><code>difference(baseline, current) == empty</code></td></tr>
+                        <tr><td>Every baseline IS-IS adjacency Up</td><td><code>difference(baseline, current) == empty</code></td></tr>
+                        <tr><td>No new critical/major alarms</td><td><code>Critical</code> / <code>Major</code> not in alarm output</td></tr>
+                    </tbody>
+                </table>
+
+                <div class="highlight-box">
+                    <strong>Exact equality for version check.</strong> <code>==</code> not <code>in</code>. Prevents "24.4.2" matching "24.4.21".
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 11: AWX Survey -->
+        <section id="survey">
+            <h2><span class="toggle-icon">&minus;</span>AWX Survey (14 Fields)</h2>
+            <div class="section-content">
+                <table>
+                    <thead><tr><th>#</th><th>Field</th><th>Type</th><th>Default</th></tr></thead>
+                    <tbody>
+                        <tr><td>1</td><td>Parallel upgrades</td><td>Dropdown</td><td>1</td></tr>
+                        <tr><td>2</td><td>Target IOS XR version</td><td>Text</td><td>24.4.2.1</td></tr>
+                        <tr><td>3</td><td>Image path on device</td><td>Dropdown</td><td>harddisk:</td></tr>
+                        <tr><td>4</td><td>Image files (filename: md5)</td><td>Textarea</td><td><em>required</em></td></tr>
+                        <tr><td>5</td><td>SMUs BEFORE (filename: md5)</td><td>Textarea</td><td><em>empty = skip</em></td></tr>
+                        <tr><td>6</td><td>SMUs AFTER (filename: md5)</td><td>Textarea</td><td><em>empty = skip</em></td></tr>
+                        <tr><td>7</td><td>Run DISK-PREP phase</td><td>Dropdown</td><td>true</td></tr>
+                        <tr><td>8</td><td>Run FPD-PREP phase</td><td>Dropdown</td><td>true</td></tr>
+                        <tr><td>9</td><td>Run FPD upgrade phase</td><td>Dropdown</td><td>true</td></tr>
+                        <tr><td>10</td><td>FPD admin reload after upgrade</td><td>Dropdown</td><td>true</td></tr>
+                        <tr><td>11</td><td>Sequenced FPD upgrades (YAML)</td><td>Textarea</td><td>[]</td></tr>
+                        <tr><td>12</td><td>Reload timeout (seconds)</td><td>Integer</td><td>2700</td></tr>
+                        <tr><td>13</td><td>Commit soak delay (seconds)</td><td>Integer</td><td>900</td></tr>
+                        <tr><td>14</td><td>Backup directory</td><td>Text</td><td>./backups</td></tr>
+                    </tbody>
+                </table>
+
+                <p>Files (image + SMUs) use combined <code>filename: md5hash</code> format &mdash; one line per file. The INIT phase splits this into the filename list and MD5 map. Legacy CLI format (<code>-e smus_before=[...] -e smus_before_md5={...}</code>) is still supported.</p>
+            </div>
+        </section>
+
+        <!-- Section 12: AWX / AAP Setup -->
+        <section id="awx-setup">
+            <h2><span class="toggle-icon">&minus;</span>AWX / AAP Setup</h2>
+            <div class="section-content">
+                <h3>Automated (recommended)</h3>
+                <p><code>provision_tower.yml</code> creates everything in one run:</p>
+                <pre># Prerequisites
+pip install awxkit
+ansible-galaxy collection install -r collections/requirements.yml
+
+# Connection
+export CONTROLLER_HOST=https://awx.example.com
+export CONTROLLER_USERNAME=admin
+export CONTROLLER_PASSWORD='...'
+
+# Run
+ansible-playbook provision_tower.yml \
+    -e tower_project_scm_url=https://github.com/YOUR_ORG/ANSB_IOS.git</pre>
+
+                <h3>What It Creates</h3>
+                <ul>
+                    <li><strong>Project</strong> &mdash; git-backed, auto-syncs on launch</li>
+                    <li><strong>Inventory</strong> &mdash; hosts + <code>iosxr_devices</code> group with connection vars</li>
+                    <li><strong>Machine Credential</strong> &mdash; IOS XR admin user/password</li>
+                    <li><strong>Job Template</strong> &mdash; <code>IOS XR Upgrade</code> with 14-field survey, Limit prompt on launch</li>
+                </ul>
+
+                <h3>Launch</h3>
+                <ol>
+                    <li><strong>Templates &rarr; IOS XR Upgrade &rarr; Launch</strong></li>
+                    <li>Fill <strong>Limit</strong>: <code>pe1.lab</code> (or multiple for parallel)</li>
+                    <li>Fill survey (most have defaults)</li>
+                    <li><strong>Launch</strong> &mdash; watch job output live in AWX</li>
+                </ol>
+            </div>
+        </section>
+
+        <!-- Section 13: Project Files -->
+        <section id="files">
+            <h2><span class="toggle-icon">&minus;</span>Project Files</h2>
+            <div class="section-content">
+                <table>
+                    <thead><tr><th>File</th><th>Purpose</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>upgrade_iosxr.yml</code></td><td>Main playbook &mdash; 13 phases with block/rescue</td></tr>
+                        <tr><td><code>smu_phase.yml</code></td><td>Reusable SMU add/activate/verify (included twice)</td></tr>
+                        <tr><td><code>fpd_sequenced_single.yml</code></td><td>Per-FPD upgrade + poll-until-CURRENT</td></tr>
+                        <tr><td><code>inventory.yml</code></td><td>Router list + management IPs + connection vars</td></tr>
+                        <tr><td><code>group_vars/iosxr_devices.yml</code></td><td>Target version, image, SMUs, FPD config</td></tr>
+                        <tr><td><code>provision_tower.yml</code></td><td>IaC &mdash; creates AWX/AAP objects via <code>awx.awx</code></td></tr>
+                        <tr><td><code>collections/requirements.yml</code></td><td>Collection dependencies</td></tr>
+                        <tr><td><code>awx_survey.json</code></td><td>14-field survey for AWX Job Template</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 14: Troubleshooting -->
+        <section id="troubleshooting">
+            <h2><span class="toggle-icon">&minus;</span>Troubleshooting</h2>
+            <div class="section-content">
+                <table>
+                    <thead><tr><th>Phase</th><th>Error</th><th>Cause</th><th>Action</th></tr></thead>
+                    <tbody>
+                        <tr><td>PRE</td><td>platform not OPERATIONAL</td><td>Line card / RSP unhealthy</td><td>Do NOT upgrade &mdash; investigate hardware</td></tr>
+                        <tr><td>PRE</td><td>NTP not synchronised</td><td>NTP server unreachable</td><td>Fix NTP, re-run PRE</td></tr>
+                        <tr><td>PRE</td><td>zero BGP peers at baseline</td><td>Device already drained or regex mismatch</td><td>Check <code>show bgp l2vpn evpn summary</code></td></tr>
+                        <tr><td>PRE</td><td>pending install operation</td><td>Previous install left uncommitted</td><td><code>show install request</code>, commit or clean</td></tr>
+                        <tr><td>INSTALL</td><td>MD5 mismatch</td><td>File transfer corrupted</td><td>Re-transfer, re-run</td></tr>
+                        <tr><td>INSTALL</td><td>activate timeout</td><td>Device didn't reload in time</td><td>Console in &mdash; may be in ROMMON</td></tr>
+                        <tr><td>FPD</td><td>NEED UPGD after FPD phase</td><td>FPD didn't upgrade</td><td>Manual <code>upgrade hw-module</code> + reload</td></tr>
+                        <tr><td>UN-ISOLATE</td><td>neighbor missing</td><td>BGP peer or IS-IS didn't return</td><td>Check peer-side status</td></tr>
+                        <tr><td>POST</td><td>version mismatch</td><td><code>target_version</code> doesn't match label</td><td>Verify with <code>show install active summary</code></td></tr>
+                        <tr><td>COMMIT</td><td>commit fails</td><td>Install subsystem broken</td><td>Open Cisco TAC case immediately</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Escalation</h3>
+                <table>
+                    <thead><tr><th>Situation</th><th>Contact</th></tr></thead>
+                    <tbody>
+                        <tr><td>Pre-install failure</td><td>On-call network engineer</td></tr>
+                        <tr><td>Device unreachable after reload</td><td>Console in, involve NOC</td></tr>
+                        <tr><td>FPD hardware errors</td><td>Cisco TAC + hardware replacement</td></tr>
+                        <tr><td><code>install rollback</code> fails</td><td>Cisco TAC immediately</td></tr>
+                        <tr><td>Multiple hosts same failure</td><td>Pause rollout, review common factor</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 15: References -->
+        <section id="references">
+            <h2><span class="toggle-icon">&minus;</span>References</h2>
+            <div class="section-content">
+                <h3>Cisco Documentation</h3>
+                <ul>
+                    <li><a href="https://www.cisco.com/c/en/us/td/docs/routers/asr9000/software/24xx/system-setup/configuration/guide/b-system-setup-cg-asr9000-24xx/perform-system-upgrade-and-install-feature-packages.html" class="reference-link" target="_blank">ASR 9000 System Setup &mdash; Upgrade &amp; Install (IOS-XR 24.x)</a></li>
+                    <li><a href="https://www.cisco.com/c/en/us/support/routers/asr-9000-series-aggregation-services-routers/products-installation-guides-list.html" class="reference-link" target="_blank">ASR9000 Hardware Installation Guides</a></li>
+                </ul>
+                <h3>Ansible</h3>
+                <ul>
+                    <li><a href="https://github.com/ansible-collections/cisco.iosxr" class="reference-link" target="_blank">cisco.iosxr Ansible Collection (GitHub)</a></li>
+                    <li><a href="https://docs.ansible.com/ansible/latest/network/user_guide/platform_iosxr.html" class="reference-link" target="_blank">Ansible IOS-XR Platform Options</a></li>
+                </ul>
+                <h3>AWX</h3>
+                <ul>
+                    <li><a href="https://github.com/ansible/awx" class="reference-link" target="_blank">AWX Project (GitHub)</a></li>
+                    <li><a href="https://github.com/ansible/awx-operator" class="reference-link" target="_blank">AWX Operator (Kubernetes)</a></li>
+                </ul>
+            </div>
+        </section>
+    </div>
+
+    <footer>
+        <p><strong>Project:</strong> ANSB_IOS | <strong>Version:</strong> v1.6 | <strong>Last Updated:</strong> April 2026</p>
+        <p>Generated from the ANSB_IOS playbook implementation. This guide reflects the actual automation behavior.</p>
+    </footer>
+
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            document.querySelectorAll("h2").forEach(function(header) {
+                header.addEventListener("click", function() {
+                    this.classList.toggle("collapsed");
+                    var content = this.nextElementSibling;
+                    if (content && content.classList.contains("section-content")) {
+                        content.style.maxHeight = this.classList.contains("collapsed") ? "0" : "10000px";
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>
