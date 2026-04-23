@@ -562,513 +562,615 @@
       tags: [isolate]
 
     # ========================================================================
-    # SMU-BEFORE — patch the current image, commit, then proceed to upgrade.
-    # Skipped automatically when `smus_before` is empty. Node is already
-    # isolated; smu_phase.yml only decides reload-vs-restart wait path.
+    # UPGRADE BLOCK — wraps all destructive phases (SMU-BEFORE through POST)
+    # in block/rescue. If any phase fails after isolation, the rescue block
+    # attempts `install rollback to committed`, waits for reload, then
+    # un-isolates the node so it returns to service on the old image.
     # ========================================================================
-    - name: "SMU-BEFORE | Apply SMUs to current image"
-      ansible.builtin.include_tasks: smu_phase.yml
-      vars:
-        smu_list: "{{ smus_before }}"
-        phase_name: "before"
-        commit_immediately: true       # so patches survive a version rollback
-        smu_md5_map: "{{ smus_before_md5 }}"
-      when: smus_before | length > 0
-      tags: [smu_before]
+    - name: "UPGRADE BLOCK | Destructive phases with automatic rollback"
+      tags: [smu_before, install, fpd, smu_after, unisolate, post]
+      block:
 
-    # ========================================================================
-    # INSTALL – verify MD5 of each image file, add, prepare, activate.
-    # Supports a single TAR bundle OR multiple individual RPMs/ISOs.
-    # Uses `synchronous` keyword so we don't need to poll `show install
-    # request` in a loop.
-    # ========================================================================
-    - name: "INSTALL | Assert MD5 map covers every image file"
-      ansible.builtin.assert:
-        that:
-          - image_files_md5 | length > 0
-          - image_files | difference(image_files_md5.keys() | list) | length == 0
-          - image_files_md5 | dict2items
-              | selectattr('value', 'match', '^[a-fA-F0-9]{32}$')
-              | list | length == image_files | length
-        fail_msg: |
-          Image MD5 verification is mandatory for every listed file.
-            Files          : {{ image_files }}
-            MD5 map keys   : {{ image_files_md5.keys() | list }}
-            Missing        : {{ image_files | difference(image_files_md5.keys() | list) }}
-          Populate image_files_combined in the survey (filename: md5, one per line).
-        success_msg: "MD5 map complete ({{ image_files_md5 | length }} hashes for {{ image_files | length }} files)."
-      tags: [install]
+        # ====================================================================
+        # SMU-BEFORE
+        # ====================================================================
+        - name: "SMU-BEFORE | Apply SMUs to current image"
+          ansible.builtin.include_tasks: smu_phase.yml
+          vars:
+            smu_list: "{{ smus_before }}"
+            phase_name: "before"
+            commit_immediately: true
+            smu_md5_map: "{{ smus_before_md5 }}"
+          when: smus_before | length > 0
+          tags: [smu_before]
 
-    - name: "INSTALL | Compute MD5 of each image file on device"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - "show md5 file /{{ image_path | regex_replace(':$','') }}:/{{ item }}"
-      loop: "{{ image_files }}"
-      register: image_md5_results
-      tags: [install]
+        # ====================================================================
+        # INSTALL
+        # ====================================================================
+        - name: "INSTALL | Assert MD5 map covers every image file"
+          ansible.builtin.assert:
+            that:
+              - image_files_md5 | length > 0
+              - image_files | difference(image_files_md5.keys() | list) | length == 0
+              - image_files_md5 | dict2items
+                  | selectattr('value', 'match', '^[a-fA-F0-9]{32}$')
+                  | list | length == image_files | length
+            fail_msg: |
+              Image MD5 verification is mandatory for every listed file.
+                Files          : {{ image_files }}
+                MD5 map keys   : {{ image_files_md5.keys() | list }}
+                Missing        : {{ image_files | difference(image_files_md5.keys() | list) }}
+              Populate image_files_combined in the survey (filename: md5, one per line).
+            success_msg: "MD5 map complete ({{ image_files_md5 | length }} hashes for {{ image_files | length }} files)."
+          tags: [install]
 
-    - name: "INSTALL | Assert MD5 of each image file matches expected"
-      ansible.builtin.assert:
-        that:
-          - (item.stdout[0] | regex_search('[a-fA-F0-9]{32}')) | lower == image_files_md5[item.item] | lower
-        fail_msg: |
-          MD5 mismatch for {{ item.item }}
-            Got      : {{ item.stdout[0] | regex_search('[a-fA-F0-9]{32}') | default('(not found)') }}
-            Expected : {{ image_files_md5[item.item] }}
-          Re-transfer the file and re-run.
-        success_msg: "MD5 OK for {{ item.item }}"
-      loop: "{{ image_md5_results.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-      tags: [install]
+        - name: "INSTALL | Compute MD5 of each image file on device"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - "show md5 file /{{ image_path | regex_replace(':$','') }}:/{{ item }}"
+          loop: "{{ image_files }}"
+          register: image_md5_results
+          tags: [install]
 
-    - name: "INSTALL | install add (synchronous)"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - "install add source {{ image_path }} {{ image_files | join(' ') }} synchronous"
-      register: install_add
-      timeout: 1800                 # 30 min; large TAR bundles can take a while
-      tags: [install]
+        - name: "INSTALL | Assert MD5 of each image file matches expected"
+          ansible.builtin.assert:
+            that:
+              - (item.stdout[0] | regex_search('[a-fA-F0-9]{32}')) | lower == image_files_md5[item.item] | lower
+            fail_msg: |
+              MD5 mismatch for {{ item.item }}
+                Got      : {{ item.stdout[0] | regex_search('[a-fA-F0-9]{32}') | default('(not found)') }}
+                Expected : {{ image_files_md5[item.item] }}
+              Re-transfer the file and re-run.
+            success_msg: "MD5 OK for {{ item.item }}"
+          loop: "{{ image_md5_results.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          tags: [install]
 
-    - name: "INSTALL | Extract install operation ID"
-      ansible.builtin.set_fact:
-        install_op_id: "{{ install_add.stdout[0] | regex_search('[Oo]peration[ :]+([0-9]+)', '\\1') | first }}"
-      tags: [install]
+        - name: "INSTALL | install add (synchronous)"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - "install add source {{ image_path }} {{ image_files | join(' ') }} synchronous"
+          register: install_add
+          timeout: 1800
+          tags: [install]
 
-    - name: "INSTALL | Prepare (synchronous — blocks until validated)"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - "install prepare id {{ install_op_id }} synchronous"
-      timeout: 1800
-      tags: [install]
+        - name: "INSTALL | Extract install operation ID"
+          ansible.builtin.set_fact:
+            install_op_id: "{{ install_add.stdout[0] | regex_search('[Oo]peration[ :]+([0-9]+)', '\\1') | first }}"
+          tags: [install]
 
-    - name: "INSTALL | Activate (synchronous — reloads the device)"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - "install activate id {{ install_op_id }} synchronous noprompt"
-      register: install_activate
-      ignore_errors: true           # session drops when device reloads
-      tags: [install]
+        - name: "INSTALL | Prepare (synchronous — blocks until validated)"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - "install prepare id {{ install_op_id }} synchronous"
+          timeout: 1800
+          tags: [install]
 
-    - name: "INSTALL | Wait for SSH to go down"
-      ansible.builtin.wait_for:
-        host: "{{ ansible_host | default(inventory_hostname) }}"
-        port: 22
-        state: stopped
-        timeout: 600
-        delay: 30
-      delegate_to: localhost
-      tags: [install]
+        - name: "INSTALL | Activate (synchronous — reloads the device)"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - "install activate id {{ install_op_id }} synchronous noprompt"
+          register: install_activate
+          ignore_errors: true
+          tags: [install]
 
-    - name: "INSTALL | Wait for SSH to come back up"
-      ansible.builtin.wait_for:
-        host: "{{ ansible_host | default(inventory_hostname) }}"
-        port: 22
-        state: started
-        timeout: "{{ reload_timeout }}"
-        delay: 60
-      delegate_to: localhost
-      tags: [install]
+        - name: "INSTALL | Wait for SSH to go down"
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host | default(inventory_hostname) }}"
+            port: 22
+            state: stopped
+            timeout: 600
+            delay: 30
+          delegate_to: localhost
+          tags: [install]
 
-    - name: "INSTALL | Pause for processes to settle"
-      ansible.builtin.pause:
-        seconds: 180
-      tags: [install]
+        - name: "INSTALL | Wait for SSH to come back up"
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host | default(inventory_hostname) }}"
+            port: 22
+            state: started
+            timeout: "{{ reload_timeout }}"
+            delay: 60
+          delegate_to: localhost
+          tags: [install]
 
-    # ========================================================================
-    # FPD — upgrade Field-Programmable Devices after the image install,
-    # while the node is still isolated.
-    #
-    # Two stages:
-    #   1. Sequenced upgrades — items in `fpd_sequenced_upgrades` are run
-    #      one at a time in list order, each polled until CURRENT before
-    #      proceeding. Use this for field-notice-driven ordering such as
-    #      FN74306 on 4HG-FLEX (Sunstreaker → TAMFW-Sunstreaker → Primary-BIOS).
-    #   2. Bulk upgrade — `upgrade hw-module location all fpd all` catches
-    #      everything else, followed by `admin hw-module location all reload`
-    #      if fpd_reload_required is true.
-    #
-    # Skipped with `fpd_upgrade_enabled: false`.
-    # ========================================================================
-    - name: "FPD | Show current FPD status (pre)"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - show hw-module fpd
-          - show fpd package
-      register: fpd_pre_status
-      when: fpd_upgrade_enabled | bool
-      tags: [fpd]
+        - name: "INSTALL | Pause for processes to settle"
+          ansible.builtin.pause:
+            seconds: 180
+          tags: [install]
 
-    - name: "FPD | Report pre-upgrade FPD state"
-      ansible.builtin.debug:
-        msg: "{{ fpd_pre_status.stdout }}"
-      when: fpd_upgrade_enabled | bool
-      tags: [fpd]
+        # ========================================================================
+        # FPD — upgrade Field-Programmable Devices after the image install,
+        # while the node is still isolated.
+        #
+        # Two stages:
+        #   1. Sequenced upgrades — items in `fpd_sequenced_upgrades` are run
+        #      one at a time in list order, each polled until CURRENT before
+        #      proceeding. Use this for field-notice-driven ordering such as
+        #      FN74306 on 4HG-FLEX (Sunstreaker → TAMFW-Sunstreaker → Primary-BIOS).
+        #   2. Bulk upgrade — `upgrade hw-module location all fpd all` catches
+        #      everything else, followed by `admin hw-module location all reload`
+        #      if fpd_reload_required is true.
+        #
+        # Skipped with `fpd_upgrade_enabled: false`.
+        # ========================================================================
+        - name: "FPD | Show current FPD status (pre)"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - show hw-module fpd
+              - show fpd package
+          register: fpd_pre_status
+          when: fpd_upgrade_enabled | bool
+          tags: [fpd]
 
-    # --- Stage 1: sequenced upgrades (skipped if list is empty) ----------
-    # Each FPD is upgraded and polled to CURRENT before the next starts.
-    # This guarantees field-notice ordering (e.g. FN74306: Sunstreaker must
-    # be CURRENT before TAMFW-Sunstreaker upgrade begins).
-    - name: "FPD | Sequenced upgrade — one FPD at a time, in order"
-      ansible.builtin.include_tasks: fpd_sequenced_single.yml
-      loop: "{{ fpd_sequenced_upgrades }}"
-      loop_control:
-        loop_var: fpd_item
-        label: "{{ fpd_item.location }} / {{ fpd_item.fpd }}"
-      when:
-        - fpd_upgrade_enabled | bool
-        - fpd_sequenced_upgrades | length > 0
-      tags: [fpd]
+        - name: "FPD | Report pre-upgrade FPD state"
+          ansible.builtin.debug:
+            msg: "{{ fpd_pre_status.stdout }}"
+          when: fpd_upgrade_enabled | bool
+          tags: [fpd]
 
-    # --- Stage 2: bulk upgrade (skipped if upgrade is disabled) ----------
-    - name: "FPD | Bulk upgrade all remaining FPDs"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - "admin upgrade hw-module location all fpd all"
-      register: fpd_bulk_upgrade
-      when: fpd_upgrade_enabled | bool
-      timeout: "{{ fpd_upgrade_timeout * 2 }}"
-      tags: [fpd]
+        # --- Stage 1: sequenced upgrades (skipped if list is empty) ----------
+        # Each FPD is upgraded and polled to CURRENT before the next starts.
+        # This guarantees field-notice ordering (e.g. FN74306: Sunstreaker must
+        # be CURRENT before TAMFW-Sunstreaker upgrade begins).
+        - name: "FPD | Sequenced upgrade — one FPD at a time, in order"
+          ansible.builtin.include_tasks: fpd_sequenced_single.yml
+          loop: "{{ fpd_sequenced_upgrades }}"
+          loop_control:
+            loop_var: fpd_item
+            label: "{{ fpd_item.location }} / {{ fpd_item.fpd }}"
+          when:
+            - fpd_upgrade_enabled | bool
+            - fpd_sequenced_upgrades | length > 0
+          tags: [fpd]
 
-    - name: "FPD | Pause to let asynchronous FPD writes flush"
-      ansible.builtin.pause:
-        seconds: 120
-      when: fpd_upgrade_enabled | bool
-      tags: [fpd]
+        # --- Stage 2: bulk upgrade (skipped if upgrade is disabled) ----------
+        - name: "FPD | Bulk upgrade all remaining FPDs"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - "admin upgrade hw-module location all fpd all"
+          register: fpd_bulk_upgrade
+          when: fpd_upgrade_enabled | bool
+          timeout: "{{ fpd_upgrade_timeout * 2 }}"
+          tags: [fpd]
 
-    # --- Stage 3: admin-plane reload if FPDs require it ------------------
-    - name: "FPD | admin hw-module location all reload"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - "admin hw-module location all reload"
-      register: fpd_reload
-      when:
-        - fpd_upgrade_enabled | bool
-        - fpd_reload_required | bool
-      ignore_errors: true           # session drops on reload
-      tags: [fpd]
+        - name: "FPD | Pause to let asynchronous FPD writes flush"
+          ansible.builtin.pause:
+            seconds: 120
+          when: fpd_upgrade_enabled | bool
+          tags: [fpd]
 
-    - name: "FPD | Wait for SSH to drop (post-FPD reload)"
-      when:
-        - fpd_upgrade_enabled | bool
-        - fpd_reload_required | bool
-      ansible.builtin.wait_for:
-        host: "{{ ansible_host | default(inventory_hostname) }}"
-        port: 22
-        state: stopped
-        timeout: 600
-        delay: 30
-      delegate_to: localhost
-      tags: [fpd]
+        # --- Stage 3: admin-plane reload if FPDs require it ------------------
+        - name: "FPD | admin hw-module location all reload"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - "admin hw-module location all reload"
+          register: fpd_reload
+          when:
+            - fpd_upgrade_enabled | bool
+            - fpd_reload_required | bool
+          ignore_errors: true           # session drops on reload
+          tags: [fpd]
 
-    - name: "FPD | Wait for SSH to return (post-FPD reload)"
-      when:
-        - fpd_upgrade_enabled | bool
-        - fpd_reload_required | bool
-      ansible.builtin.wait_for:
-        host: "{{ ansible_host | default(inventory_hostname) }}"
-        port: 22
-        state: started
-        timeout: "{{ reload_timeout }}"
-        delay: 60
-      delegate_to: localhost
-      tags: [fpd]
+        - name: "FPD | Wait for SSH to drop (post-FPD reload)"
+          when:
+            - fpd_upgrade_enabled | bool
+            - fpd_reload_required | bool
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host | default(inventory_hostname) }}"
+            port: 22
+            state: stopped
+            timeout: 600
+            delay: 30
+          delegate_to: localhost
+          tags: [fpd]
 
-    - name: "FPD | Settle pause after reload"
-      ansible.builtin.pause:
-        seconds: 240
-      when:
-        - fpd_upgrade_enabled | bool
-        - fpd_reload_required | bool
-      tags: [fpd]
+        - name: "FPD | Wait for SSH to return (post-FPD reload)"
+          when:
+            - fpd_upgrade_enabled | bool
+            - fpd_reload_required | bool
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host | default(inventory_hostname) }}"
+            port: 22
+            state: started
+            timeout: "{{ reload_timeout }}"
+            delay: 60
+          delegate_to: localhost
+          tags: [fpd]
 
-    # --- Stage 4: verify no FPDs still need upgrade ---------------------
-    - name: "FPD | Show FPD status after upgrade"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - show hw-module fpd
-      register: fpd_post_status
-      when: fpd_upgrade_enabled | bool
-      tags: [fpd]
+        - name: "FPD | Settle pause after reload"
+          ansible.builtin.pause:
+            seconds: 240
+          when:
+            - fpd_upgrade_enabled | bool
+            - fpd_reload_required | bool
+          tags: [fpd]
 
-    - name: "FPD | Report post-upgrade FPD state"
-      ansible.builtin.debug:
-        msg: "{{ fpd_post_status.stdout[0] }}"
-      when: fpd_upgrade_enabled | bool
-      tags: [fpd]
+        # --- Stage 4: verify no FPDs still need upgrade ---------------------
+        - name: "FPD | Show FPD status after upgrade"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - show hw-module fpd
+          register: fpd_post_status
+          when: fpd_upgrade_enabled | bool
+          tags: [fpd]
 
-    - name: "FPD | Assert no FPDs still show NEED UPGD"
-      ansible.builtin.assert:
-        that:
-          - "'NEED UPGD' not in fpd_post_status.stdout[0]"
-          - "'NEED REL' not in fpd_post_status.stdout[0]"
-        fail_msg: |
-          One or more FPDs still need upgrade or reload after the FPD phase.
-          Inspect `show hw-module fpd` output above. Do NOT proceed to commit.
-        success_msg: "All FPDs are CURRENT after the FPD phase."
-      when: fpd_upgrade_enabled | bool
-      tags: [fpd]
+        - name: "FPD | Report post-upgrade FPD state"
+          ansible.builtin.debug:
+            msg: "{{ fpd_post_status.stdout[0] }}"
+          when: fpd_upgrade_enabled | bool
+          tags: [fpd]
 
-    # ========================================================================
-    # SMU-AFTER — apply SMUs on top of the new version while still isolated.
-    # Skipped automatically when `smus_after` is empty.
-    # commit_immediately=false so the final COMMIT block atomically commits
-    # the version upgrade + these SMUs together; if SMU-after fails, nothing
-    # is committed and the whole thing remains rollback-capable.
-    # ========================================================================
-    - name: "SMU-AFTER | Apply SMUs on top of new image"
-      ansible.builtin.include_tasks: smu_phase.yml
-      vars:
-        smu_list: "{{ smus_after }}"
-        phase_name: "after"
-        commit_immediately: false
-        smu_md5_map: "{{ smus_after_md5 }}"
-      when: smus_after | length > 0
-      tags: [smu_after]
+        - name: "FPD | Assert no FPDs still show NEED UPGD"
+          ansible.builtin.assert:
+            that:
+              - "'NEED UPGD' not in fpd_post_status.stdout[0]"
+              - "'NEED REL' not in fpd_post_status.stdout[0]"
+            fail_msg: |
+              One or more FPDs still need upgrade or reload after the FPD phase.
+              Inspect `show hw-module fpd` output above. Do NOT proceed to commit.
+            success_msg: "All FPDs are CURRENT after the FPD phase."
+          when: fpd_upgrade_enabled | bool
+          tags: [fpd]
 
-    # ========================================================================
-    # UN-ISOLATE – put the node back into service AFTER all package work.
-    # This is the single point where traffic returns to the node.
-    #   1. Clear IS-IS overload  → node is a valid transit again
-    #   2. no shutdown Lo1       → BGP/EVI sessions come back up
-    # Order matters: clear overload first, then bring Lo1 up, so IS-IS
-    # reconverges before BGP peers start establishing.
-    # ========================================================================
-    - name: "UN-ISOLATE | Clear IS-IS overload bit"
-      cisco.iosxr.iosxr_config:
-        lines:
-          - no set-overload-bit
-        parents: router isis main
-        commit_comment: "End of maintenance window: clear IS-IS overload ({{ target_version }})"
-      tags: [unisolate]
+        # ========================================================================
+        # SMU-AFTER — apply SMUs on top of the new version while still isolated.
+        # Skipped automatically when `smus_after` is empty.
+        # commit_immediately=false so the final COMMIT block atomically commits
+        # the version upgrade + these SMUs together; if SMU-after fails, nothing
+        # is committed and the whole thing remains rollback-capable.
+        # ========================================================================
+        - name: "SMU-AFTER | Apply SMUs on top of new image"
+          ansible.builtin.include_tasks: smu_phase.yml
+          vars:
+            smu_list: "{{ smus_after }}"
+            phase_name: "after"
+            commit_immediately: false
+            smu_md5_map: "{{ smus_after_md5 }}"
+          when: smus_after | length > 0
+          tags: [smu_after]
 
-    - name: "UN-ISOLATE | Bring Loopback1 back up"
-      cisco.iosxr.iosxr_config:
-        lines:
-          - no shutdown
-        parents: interface Loopback1
-        match: line
-        commit_comment: "End of maintenance window: Lo1 back up ({{ target_version }})"
-      tags: [unisolate]
+        # ========================================================================
+        # UN-ISOLATE – put the node back into service AFTER all package work.
+        # This is the single point where traffic returns to the node.
+        #   1. Clear IS-IS overload  → node is a valid transit again
+        #   2. no shutdown Lo1       → BGP/EVI sessions come back up
+        # Order matters: clear overload first, then bring Lo1 up, so IS-IS
+        # reconverges before BGP peers start establishing.
+        # ========================================================================
+        - name: "UN-ISOLATE | Clear IS-IS overload bit"
+          cisco.iosxr.iosxr_config:
+            lines:
+              - no set-overload-bit
+            parents: router isis main
+            commit_comment: "End of maintenance window: clear IS-IS overload ({{ target_version }})"
+          tags: [unisolate]
 
-    - name: "UN-ISOLATE | Wait for ALL baseline IS-IS adjacencies to reform"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - show isis adjacency
-      register: unisolate_isis_poll
-      until: >-
-        (isis_neighbors_before
-          | difference(unisolate_isis_poll.stdout[0]
-               | regex_findall('(?m)^(\S+)\s+\S+\s+\S+\s+Up\s')
-               | unique | list)
-          | length) == 0
-      retries: 40
-      delay: 15
-      tags: [unisolate]
+        - name: "UN-ISOLATE | Bring Loopback1 back up"
+          cisco.iosxr.iosxr_config:
+            lines:
+              - no shutdown
+            parents: interface Loopback1
+            match: line
+            commit_comment: "End of maintenance window: Lo1 back up ({{ target_version }})"
+          tags: [unisolate]
 
-    - name: "UN-ISOLATE | Wait for ALL baseline EVPN BGP peers to re-establish"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - show bgp l2vpn evpn summary
-      register: unisolate_bgp_poll
-      until: >-
-        (bgp_neighbors_before
-          | difference(unisolate_bgp_poll.stdout[0]
-               | regex_findall('(?m)^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s*$')
-               | unique | list)
-          | length) == 0
-      retries: 80
-      delay: 15
-      tags: [unisolate]
+        - name: "UN-ISOLATE | Wait for ALL baseline IS-IS adjacencies to reform"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - show isis adjacency
+          register: unisolate_isis_poll
+          until: >-
+            (isis_neighbors_before
+              | difference(unisolate_isis_poll.stdout[0]
+                   | regex_findall('(?m)^(\S+)\s+\S+\s+\S+\s+Up\s')
+                   | unique | list)
+              | length) == 0
+          retries: 40
+          delay: 15
+          tags: [unisolate]
 
-    - name: "UN-ISOLATE | Compute any still-missing neighbours (should be empty)"
-      ansible.builtin.set_fact:
-        isis_missing_after_unisolate: >-
-          {{ isis_neighbors_before
-             | difference(unisolate_isis_poll.stdout[0]
-                  | regex_findall('(?m)^(\S+)\s+\S+\s+\S+\s+Up\s')
-                  | unique | list) }}
-        bgp_missing_after_unisolate: >-
-          {{ bgp_neighbors_before
-             | difference(unisolate_bgp_poll.stdout[0]
-                  | regex_findall('(?m)^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s*$')
-                  | unique | list) }}
-      tags: [unisolate]
+        - name: "UN-ISOLATE | Wait for ALL baseline EVPN BGP peers to re-establish"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - show bgp l2vpn evpn summary
+          register: unisolate_bgp_poll
+          until: >-
+            (bgp_neighbors_before
+              | difference(unisolate_bgp_poll.stdout[0]
+                   | regex_findall('(?m)^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s*$')
+                   | unique | list)
+              | length) == 0
+          retries: 80
+          delay: 15
+          tags: [unisolate]
 
-    - name: "UN-ISOLATE | Assert every baseline neighbour is restored before POST"
-      ansible.builtin.assert:
-        that:
-          - isis_missing_after_unisolate | length == 0
-          - bgp_missing_after_unisolate  | length == 0
-        fail_msg: |
-          One or more baseline neighbours did not come back after un-isolation.
-            IS-IS missing : {{ isis_missing_after_unisolate }}
-            BGP   missing : {{ bgp_missing_after_unisolate }}
-          Aborting before POST verification — do NOT commit.
-        success_msg: >-
-          All baseline neighbours restored
-          (IS-IS {{ isis_neighbors_before | length }},
-          BGP {{ bgp_neighbors_before | length }}).
-      tags: [unisolate]
+        - name: "UN-ISOLATE | Compute any still-missing neighbours (should be empty)"
+          ansible.builtin.set_fact:
+            isis_missing_after_unisolate: >-
+              {{ isis_neighbors_before
+                 | difference(unisolate_isis_poll.stdout[0]
+                      | regex_findall('(?m)^(\S+)\s+\S+\s+\S+\s+Up\s')
+                      | unique | list) }}
+            bgp_missing_after_unisolate: >-
+              {{ bgp_neighbors_before
+                 | difference(unisolate_bgp_poll.stdout[0]
+                      | regex_findall('(?m)^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s*$')
+                      | unique | list) }}
+          tags: [unisolate]
 
-    - name: "UN-ISOLATE | Convergence pause"
-      ansible.builtin.pause:
-        seconds: 120
-      tags: [unisolate]
+        - name: "UN-ISOLATE | Assert every baseline neighbour is restored before POST"
+          ansible.builtin.assert:
+            that:
+              - isis_missing_after_unisolate | length == 0
+              - bgp_missing_after_unisolate  | length == 0
+            fail_msg: |
+              One or more baseline neighbours did not come back after un-isolation.
+                IS-IS missing : {{ isis_missing_after_unisolate }}
+                BGP   missing : {{ bgp_missing_after_unisolate }}
+              Aborting before POST verification — do NOT commit.
+            success_msg: >-
+              All baseline neighbours restored
+              (IS-IS {{ isis_neighbors_before | length }},
+              BGP {{ bgp_neighbors_before | length }}).
+          tags: [unisolate]
 
-    # ========================================================================
-    # POST-CHECKS
-    # ========================================================================
-    - name: "POST | Re-gather IOS XR facts"
-      cisco.iosxr.iosxr_facts:
-        gather_subset: all
-      register: post_facts
-      tags: [post]
+        - name: "UN-ISOLATE | Convergence pause"
+          ansible.builtin.pause:
+            seconds: 120
+          tags: [unisolate]
 
-    - name: "POST | Assert target version is running"
-      ansible.builtin.assert:
-        that:
-          - post_facts.ansible_facts.ansible_net_version == target_version
-        fail_msg: "Version mismatch – got {{ post_facts.ansible_facts.ansible_net_version }}, expected {{ target_version }}"
-        success_msg: "Version OK → {{ target_version }}"
-      tags: [post]
+        # ========================================================================
+        # POST-CHECKS
+        # ========================================================================
+        - name: "POST | Re-gather IOS XR facts"
+          cisco.iosxr.iosxr_facts:
+            gather_subset: all
+          register: post_facts
+          tags: [post]
 
-    - name: "POST | Capture post-upgrade state (same command set as PRE)"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - show version                          # [0]
-          - show install committed summary        # [1]
-          - show install active summary           # [2]
-          - admin show install active summary     # [3]
-          - show platform                         # [4]
-          - show interfaces description           # [5]
-          - show ipv4 interface brief             # [6]
-          - show route                            # [7]
-          - show isis adjacency                   # [8]
-          - show isis topology                    # [9]
-          - show bgp l2vpn evpn summary           # [10]
-          - show bgp l2vpn evpn                   # [11]
-          - show ntp status                       # [12]
-      register: post_state
-      tags: [post]
+        - name: "POST | Assert target version is running"
+          ansible.builtin.assert:
+            that:
+              - post_facts.ansible_facts.ansible_net_version == target_version
+            fail_msg: "Version mismatch – got {{ post_facts.ansible_facts.ansible_net_version }}, expected {{ target_version }}"
+            success_msg: "Version OK → {{ target_version }}"
+          tags: [post]
 
-    - name: "POST | Capture active system alarms (gating only)"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - show alarms brief system active
-      register: post_alarms
-      tags: [post]
+        - name: "POST | Capture post-upgrade state (same command set as PRE)"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - show version                          # [0]
+              - show install committed summary        # [1]
+              - show install active summary           # [2]
+              - admin show install active summary     # [3]
+              - show platform                         # [4]
+              - show interfaces description           # [5]
+              - show ipv4 interface brief             # [6]
+              - show route                            # [7]
+              - show isis adjacency                   # [8]
+              - show isis topology                    # [9]
+              - show bgp l2vpn evpn summary           # [10]
+              - show bgp l2vpn evpn                   # [11]
+              - show ntp status                       # [12]
+          register: post_state
+          tags: [post]
 
-    - name: "POST | Save post-upgrade snapshot locally"
-      ansible.builtin.copy:
-        content: |
-          # ==============================================================
-          # Post-upgrade state for {{ inventory_hostname }}
-          # Captured  : {{ lookup('pipe','date -u +%FT%TZ') }}
-          # Version   : {{ post_facts.ansible_facts.ansible_net_version }}
-          # ==============================================================
-          {% set cmds = [
-              'show version',
-              'show install committed summary',
-              'show install active summary',
-              'admin show install active summary',
-              'show platform',
-              'show interfaces description',
-              'show ipv4 interface brief',
-              'show route',
-              'show isis adjacency',
-              'show isis topology',
-              'show bgp l2vpn evpn summary',
-              'show bgp l2vpn evpn',
-              'show ntp status',
-          ] %}
-          {% for i in range(cmds | length) %}
-          ==============================================================
-          # {{ cmds[i] }}
-          ==============================================================
-          {{ post_state.stdout[i] }}
-          {% endfor %}
-          ==============================================================
-          # show alarms brief system active
-          ==============================================================
-          {{ post_alarms.stdout[0] }}
-        dest: "{{ backup_dir }}/{{ inventory_hostname }}_post_{{ lookup('pipe','date -u +%Y%m%dT%H%M%SZ') }}.txt"
-        mode: "0640"
-      delegate_to: localhost
-      tags: [post]
+        - name: "POST | Capture active system alarms (gating only)"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - show alarms brief system active
+          register: post_alarms
+          tags: [post]
 
-    - name: "POST | Re-extract current neighbour sets"
-      ansible.builtin.set_fact:
-        isis_neighbors_after: >-
-          {{ post_state.stdout[8]
-             | regex_findall('(?m)^(\S+)\s+\S+\s+\S+\s+Up\s')
-             | unique | list }}
-        bgp_neighbors_after: >-
-          {{ post_state.stdout[10]
-             | regex_findall('(?m)^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s*$')
-             | unique | list }}
-      tags: [post]
+        - name: "POST | Save post-upgrade snapshot locally"
+          ansible.builtin.copy:
+            content: |
+              # ==============================================================
+              # Post-upgrade state for {{ inventory_hostname }}
+              # Captured  : {{ lookup('pipe','date -u +%FT%TZ') }}
+              # Version   : {{ post_facts.ansible_facts.ansible_net_version }}
+              # ==============================================================
+              {% set cmds = [
+                  'show version',
+                  'show install committed summary',
+                  'show install active summary',
+                  'admin show install active summary',
+                  'show platform',
+                  'show interfaces description',
+                  'show ipv4 interface brief',
+                  'show route',
+                  'show isis adjacency',
+                  'show isis topology',
+                  'show bgp l2vpn evpn summary',
+                  'show bgp l2vpn evpn',
+                  'show ntp status',
+              ] %}
+              {% for i in range(cmds | length) %}
+              ==============================================================
+              # {{ cmds[i] }}
+              ==============================================================
+              {{ post_state.stdout[i] }}
+              {% endfor %}
+              ==============================================================
+              # show alarms brief system active
+              ==============================================================
+              {{ post_alarms.stdout[0] }}
+            dest: "{{ backup_dir }}/{{ inventory_hostname }}_post_{{ lookup('pipe','date -u +%Y%m%dT%H%M%SZ') }}.txt"
+            mode: "0640"
+          delegate_to: localhost
+          tags: [post]
 
-    - name: "POST | Assert platform healthy after reload"
-      ansible.builtin.assert:
-        that:
-          - "'IOS XR RUN' in post_state.stdout[4] or 'OPERATIONAL' in post_state.stdout[4]"
-          - "'Not Ready' not in post_state.stdout[4]"
-        fail_msg: "Platform did not return to healthy state."
-      tags: [post]
+        - name: "POST | Re-extract current neighbour sets"
+          ansible.builtin.set_fact:
+            isis_neighbors_after: >-
+              {{ post_state.stdout[8]
+                 | regex_findall('(?m)^(\S+)\s+\S+\s+\S+\s+Up\s')
+                 | unique | list }}
+            bgp_neighbors_after: >-
+              {{ post_state.stdout[10]
+                 | regex_findall('(?m)^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s*$')
+                 | unique | list }}
+          tags: [post]
 
-    - name: "POST | Assert NTP is synchronised on new image"
-      ansible.builtin.assert:
-        that:
-          - "'Clock is synchronized' in post_state.stdout[12] or 'synchronised' in post_state.stdout[12]"
-        fail_msg: "NTP not synchronised after upgrade – investigate before commit."
-      tags: [post]
+        - name: "POST | Assert platform healthy after reload"
+          ansible.builtin.assert:
+            that:
+              - "'IOS XR RUN' in post_state.stdout[4] or 'OPERATIONAL' in post_state.stdout[4]"
+              - "'Not Ready' not in post_state.stdout[4]"
+            fail_msg: "Platform did not return to healthy state."
+          tags: [post]
 
-    - name: "POST | Assert install-active summary references target version"
-      ansible.builtin.assert:
-        that:
-          - target_version in post_state.stdout[2] or target_version in post_state.stdout[3]
-        fail_msg: >-
-          Target version {{ target_version }} not present in
-          `show install active summary` — activation may not have landed.
-      tags: [post]
+        - name: "POST | Assert NTP is synchronised on new image"
+          ansible.builtin.assert:
+            that:
+              - "'Clock is synchronized' in post_state.stdout[12] or 'synchronised' in post_state.stdout[12]"
+            fail_msg: "NTP not synchronised after upgrade – investigate before commit."
+          tags: [post]
 
-    - name: "POST | Assert every baseline BGP peer is still Established"
-      ansible.builtin.assert:
-        that:
-          - (bgp_neighbors_before | difference(bgp_neighbors_after) | length) == 0
-        fail_msg: >-
-          BGP peers missing after upgrade:
-          {{ bgp_neighbors_before | difference(bgp_neighbors_after) }}
-        success_msg: >-
-          All {{ bgp_neighbors_before | length }} baseline EVPN BGP peers
-          still Established.
-      tags: [post]
+        - name: "POST | Assert install-active summary references target version"
+          ansible.builtin.assert:
+            that:
+              - target_version in post_state.stdout[2] or target_version in post_state.stdout[3]
+            fail_msg: >-
+              Target version {{ target_version }} not present in
+              `show install active summary` — activation may not have landed.
+          tags: [post]
 
-    - name: "POST | Assert every baseline IS-IS adjacency is still Up"
-      ansible.builtin.assert:
-        that:
-          - (isis_neighbors_before | difference(isis_neighbors_after) | length) == 0
-        fail_msg: >-
-          IS-IS adjacencies missing after upgrade:
-          {{ isis_neighbors_before | difference(isis_neighbors_after) }}
-        success_msg: >-
-          All {{ isis_neighbors_before | length }} baseline IS-IS adjacencies
-          still Up.
-      tags: [post]
+        - name: "POST | Assert every baseline BGP peer is still Established"
+          ansible.builtin.assert:
+            that:
+              - (bgp_neighbors_before | difference(bgp_neighbors_after) | length) == 0
+            fail_msg: >-
+              BGP peers missing after upgrade:
+              {{ bgp_neighbors_before | difference(bgp_neighbors_after) }}
+            success_msg: >-
+              All {{ bgp_neighbors_before | length }} baseline EVPN BGP peers
+              still Established.
+          tags: [post]
 
-    - name: "POST | Assert no new critical/major alarms"
-      ansible.builtin.assert:
-        that:
-          - "'Critical' not in post_alarms.stdout[0]"
-          - "'Major' not in post_alarms.stdout[0]"
-        fail_msg: "Critical/major alarms present after upgrade – NOT committing."
-      tags: [post]
+        - name: "POST | Assert every baseline IS-IS adjacency is still Up"
+          ansible.builtin.assert:
+            that:
+              - (isis_neighbors_before | difference(isis_neighbors_after) | length) == 0
+            fail_msg: >-
+              IS-IS adjacencies missing after upgrade:
+              {{ isis_neighbors_before | difference(isis_neighbors_after) }}
+            success_msg: >-
+              All {{ isis_neighbors_before | length }} baseline IS-IS adjacencies
+              still Up.
+          tags: [post]
 
-    - name: "POST | Soak period before commit ({{ commit_delay }}s)"
-      ansible.builtin.pause:
-        seconds: "{{ commit_delay }}"
-      tags: [post]
+        - name: "POST | Assert no new critical/major alarms"
+          ansible.builtin.assert:
+            that:
+              - "'Critical' not in post_alarms.stdout[0]"
+              - "'Major' not in post_alarms.stdout[0]"
+            fail_msg: "Critical/major alarms present after upgrade – NOT committing."
+          tags: [post]
+
+        - name: "POST | Soak period before commit ({{ commit_delay }}s)"
+          ansible.builtin.pause:
+            seconds: "{{ commit_delay }}"
+          tags: [post]
+
+      # ======================================================================
+      # RESCUE — automatic rollback on any failure after isolation
+      # ======================================================================
+      rescue:
+        - name: "RESCUE | Record failure details"
+          ansible.builtin.set_fact:
+            upgrade_failed: true
+            upgrade_failure_msg: "{{ ansible_failed_result.msg | default('Unknown failure') }}"
+            upgrade_failure_task: "{{ ansible_failed_task.name | default('Unknown task') }}"
+
+        - name: "RESCUE | Report failure"
+          ansible.builtin.debug:
+            msg:
+              - "!!! UPGRADE FAILED — INITIATING AUTOMATIC ROLLBACK !!!"
+              - "Host    : {{ inventory_hostname }}"
+              - "Task    : {{ upgrade_failure_task }}"
+              - "Error   : {{ upgrade_failure_msg }}"
+
+        - name: "RESCUE | Attempt install rollback to committed"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - "install rollback to committed noprompt"
+          register: rollback_result
+          ignore_errors: true
+          timeout: 300
+
+        - name: "RESCUE | Wait for SSH to drop (rollback reload)"
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host | default(inventory_hostname) }}"
+            port: 22
+            state: stopped
+            timeout: 600
+            delay: 30
+          delegate_to: localhost
+          ignore_errors: true
+
+        - name: "RESCUE | Wait for SSH to return (rollback reload)"
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host | default(inventory_hostname) }}"
+            port: 22
+            state: started
+            timeout: "{{ reload_timeout }}"
+            delay: 60
+          delegate_to: localhost
+
+        - name: "RESCUE | Pause for processes to settle after rollback"
+          ansible.builtin.pause:
+            seconds: 180
+
+        - name: "RESCUE | Un-isolate — clear IS-IS overload"
+          cisco.iosxr.iosxr_config:
+            lines:
+              - no set-overload-bit
+            parents: router isis main
+            commit_comment: "RESCUE rollback: clear IS-IS overload"
+          ignore_errors: true
+
+        - name: "RESCUE | Un-isolate — bring Loopback1 back up"
+          cisco.iosxr.iosxr_config:
+            lines:
+              - no shutdown
+            parents: interface Loopback1
+            match: line
+            commit_comment: "RESCUE rollback: Lo1 back up"
+          ignore_errors: true
+
+        - name: "RESCUE | Verify rollback version"
+          cisco.iosxr.iosxr_command:
+            commands:
+              - show version | include Version
+              - show install active summary
+          register: rollback_version
+          ignore_errors: true
+
+        - name: "RESCUE | Rollback summary"
+          ansible.builtin.debug:
+            msg:
+              - "=========================================="
+              - "AUTOMATIC ROLLBACK COMPLETE"
+              - "Host       : {{ inventory_hostname }}"
+              - "Failed at  : {{ upgrade_failure_task }}"
+              - "Reason     : {{ upgrade_failure_msg }}"
+              - "Version    : {{ rollback_version.stdout[0] | default('unable to determine') }}"
+              - "Node state : un-isolated (IS-IS + Lo1 restored)"
+              - ""
+              - "ACTION REQUIRED:"
+              - "  1. Verify neighbors returned: show bgp l2vpn evpn summary"
+              - "  2. Verify IS-IS adjacency: show isis adjacency"
+              - "  3. Investigate failure cause before re-attempting"
+              - "=========================================="
+
+        - name: "RESCUE | Fail the play after rollback"
+          ansible.builtin.fail:
+            msg: >-
+              Upgrade failed at '{{ upgrade_failure_task }}' —
+              automatic rollback completed. Review the RESCUE output above.
 
     # ========================================================================
     # COMMIT
