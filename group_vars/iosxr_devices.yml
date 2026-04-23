@@ -29,18 +29,29 @@
 # before rolling out fleet-wide.
 target_version: "24.4.2.1"
 
-# TAR bundle (or plain ISO) staged on harddisk: on each router.
-# Example build line for a bundle (mini ISO + optional feature RPMs):
-#   tar -cf asr9k-x64-24.4.2.1.tar \
-#       asr9k-mini-x64-24.4.2.iso \
-#       asr9k-isis-x64-*.rpm \
-#       asr9k-k9sec-x64-*.rpm \
-#       asr9k-mgbl-x64-*.rpm \
-#       asr9k-mpls-x64-*.rpm \
-#       asr9k-mpls-te-rsvp-x64-*.rpm
-# Then SCP to harddisk: on the target router.
-image_file:      "asr9k-x64-24.4.2.1.tar"
-image_file_md5:  ""                                 # REPLACE with md5sum of the new .tar
+# Image file(s) staged on harddisk: on each router.
+# Single TAR bundle or individual RPMs/ISOs — each with its MD5.
+# Generate MD5s with `md5sum <filename>` on the file server.
+#
+# TAR example (single file):
+#   image_files:
+#     - asr9k-x64-24.4.2.1.tar
+#   image_files_md5:
+#     asr9k-x64-24.4.2.1.tar: "7174dd5a5cf7952209b67602e038af0d"
+#
+# Individual files example:
+#   image_files:
+#     - asr9k-mini-x64-24.4.2.iso
+#     - asr9k-isis-x64-2.4.2.1-r2442.x86_64.rpm
+#     - asr9k-mpls-x64-2.4.2.1-r2442.x86_64.rpm
+#   image_files_md5:
+#     asr9k-mini-x64-24.4.2.iso: "7174dd5a..."
+#     asr9k-isis-x64-2.4.2.1-r2442.x86_64.rpm: "3fa8b2c1..."
+#     asr9k-mpls-x64-2.4.2.1-r2442.x86_64.rpm: "9c21ef44..."
+image_files:
+  - asr9k-x64-24.4.2.1.tar
+image_files_md5:
+  asr9k-x64-24.4.2.1.tar: ""     # REPLACE with md5sum of the .tar
 image_path:      "harddisk:"
 
 

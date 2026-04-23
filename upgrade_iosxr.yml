@@ -33,7 +33,8 @@
     # ("24.4.2.1") verify on one device first that the label renders that
     # way — otherwise the POST assertion will fail even on a good upgrade.
     target_version: "24.4.2.1"
-    image_file:      "asr9k-x64-24.4.2.1.tar"
+    image_files: []                # list of image filenames (TAR or individual RPMs/ISOs)
+    image_files_md5: {}            # filename → expected MD5 map
     image_path: "harddisk:"        # trailing slash added where needed
     reload_timeout: 2700           # 45 min – large chassis can take a while
     commit_delay: 900              # 15 min soak before `install commit`
@@ -41,9 +42,6 @@
     upgrade_serial: 1              # devices upgraded at once (1 = safest)
 
     # --- MD5 verification (mandatory) ----------------------------------------
-    # Expected MD5 of image / tar bundle. Must be set — playbook refuses to
-    # proceed without a valid 32-char hex hash. Override in group_vars or survey.
-    image_file_md5: ""             # e.g. "7174dd5a5cf7952209b67602e038af0d"
     # Expected MD5s for SMUs, keyed by filename. Keys MUST match smus_* list.
     smus_before_md5: {}            # e.g. {"asr9k-sysadmin-install-...rpm": "6cb3873..."}
     smus_after_md5:  {}
@@ -100,6 +98,15 @@
     # ========================================================================
 
     # --- Combined survey fields → split into list + dict ------------------
+    - name: "INIT | Split combined image files field into list + MD5 map"
+      ansible.builtin.set_fact:
+        image_files: >-
+          {{ (image_files_combined | from_yaml | default({}) ).keys() | list }}
+        image_files_md5: >-
+          {{ image_files_combined | from_yaml | default({}) }}
+      when: image_files_combined is defined and image_files_combined | length > 0
+      tags: [always]
+
     - name: "INIT | Split combined SMU-BEFORE field into list + MD5 map"
       ansible.builtin.set_fact:
         smus_before: >-
@@ -180,10 +187,18 @@
         success_msg: "Running {{ pre_facts.ansible_facts.ansible_net_version }} → upgrading to {{ target_version }}"
       tags: [pre]
 
-    - name: "PRE | Verify staged image exists on device"
+    - name: "PRE | Assert at least one image file is specified"
+      ansible.builtin.assert:
+        that:
+          - image_files | length > 0
+        fail_msg: "No image files specified. Populate image_files_combined in the survey or image_files via CLI."
+      tags: [pre]
+
+    - name: "PRE | Verify each staged image file exists on device"
       cisco.iosxr.iosxr_command:
         commands:
-          - "dir {{ image_path }}/{{ image_file }}"
+          - "dir {{ image_path }}/{{ item }}"
+      loop: "{{ image_files }}"
       register: image_check
       failed_when: >
         ('No such file' in (image_check.stdout[0] | default(''))) or
@@ -562,56 +577,55 @@
       tags: [smu_before]
 
     # ========================================================================
-    # INSTALL – verify MD5, add, prepare, activate (using `sync`/synchronous
-    # keyword so we don't need to poll `show install request` in a loop).
-    # Works the same whether `image_file` is a `.iso` or a `.tar` bundle.
+    # INSTALL – verify MD5 of each image file, add, prepare, activate.
+    # Supports a single TAR bundle OR multiple individual RPMs/ISOs.
+    # Uses `synchronous` keyword so we don't need to poll `show install
+    # request` in a loop.
     # ========================================================================
-    - name: "INSTALL | Verify image file exists on device"
-      cisco.iosxr.iosxr_command:
-        commands:
-          - "dir {{ image_path }}/{{ image_file }}"
-      register: image_dir_check
-      failed_when: >
-        ('No such file' in (image_dir_check.stdout[0] | default(''))) or
-        ('Error' in (image_dir_check.stdout[0] | default('')))
-      tags: [install]
-
-    - name: "INSTALL | Assert image MD5 is provided (mandatory)"
+    - name: "INSTALL | Assert MD5 map covers every image file"
       ansible.builtin.assert:
         that:
-          - image_file_md5 | length > 0
-          - image_file_md5 | regex_search('^[a-fA-F0-9]{32}$') is not none
+          - image_files_md5 | length > 0
+          - image_files | difference(image_files_md5.keys() | list) | length == 0
+          - image_files_md5 | dict2items
+              | selectattr('value', 'match', '^[a-fA-F0-9]{32}$')
+              | list | length == image_files | length
         fail_msg: |
-          image_file_md5 is mandatory but not set (or not a 32-char hex hash).
-            Got: "{{ image_file_md5 }}"
-          Generate with `md5sum {{ image_file }}` on the file server and
-          populate group_vars/iosxr_devices.yml (or the survey field).
-        success_msg: "Image MD5 supplied: {{ image_file_md5 }}"
+          Image MD5 verification is mandatory for every listed file.
+            Files          : {{ image_files }}
+            MD5 map keys   : {{ image_files_md5.keys() | list }}
+            Missing        : {{ image_files | difference(image_files_md5.keys() | list) }}
+          Populate image_files_combined in the survey (filename: md5, one per line).
+        success_msg: "MD5 map complete ({{ image_files_md5 | length }} hashes for {{ image_files | length }} files)."
       tags: [install]
 
-    - name: "INSTALL | Compute MD5 of image file on device"
+    - name: "INSTALL | Compute MD5 of each image file on device"
       cisco.iosxr.iosxr_command:
         commands:
-          - "show md5 file /{{ image_path | regex_replace(':$','') }}:/{{ image_file }}"
-      register: image_md5_check
+          - "show md5 file /{{ image_path | regex_replace(':$','') }}:/{{ item }}"
+      loop: "{{ image_files }}"
+      register: image_md5_results
       tags: [install]
 
-    - name: "INSTALL | Assert image MD5 matches expected"
+    - name: "INSTALL | Assert MD5 of each image file matches expected"
       ansible.builtin.assert:
         that:
-          - (image_md5_check.stdout[0] | regex_search('[a-fA-F0-9]{32}')) | lower == image_file_md5 | lower
+          - (item.stdout[0] | regex_search('[a-fA-F0-9]{32}')) | lower == image_files_md5[item.item] | lower
         fail_msg: |
-          MD5 mismatch for {{ image_file }}
-            Got      : {{ image_md5_check.stdout[0] | regex_search('[a-fA-F0-9]{32}') }}
-            Expected : {{ image_file_md5 }}
+          MD5 mismatch for {{ item.item }}
+            Got      : {{ item.stdout[0] | regex_search('[a-fA-F0-9]{32}') | default('(not found)') }}
+            Expected : {{ image_files_md5[item.item] }}
           Re-transfer the file and re-run.
-        success_msg: "MD5 OK for {{ image_file }}"
+        success_msg: "MD5 OK for {{ item.item }}"
+      loop: "{{ image_md5_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
       tags: [install]
 
     - name: "INSTALL | install add (synchronous)"
       cisco.iosxr.iosxr_command:
         commands:
-          - "install add source {{ image_path }} {{ image_file }} synchronous"
+          - "install add source {{ image_path }} {{ image_files | join(' ') }} synchronous"
       register: install_add
       timeout: 1800                 # 30 min; large TAR bundles can take a while
       tags: [install]
